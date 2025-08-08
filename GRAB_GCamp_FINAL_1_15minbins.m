@@ -2,7 +2,7 @@
 
 % This script processes photometry data and performs the following:
 % 1. Basic signal processing and z-scoring
-% 2. 15-minute binning of baseline, post-injection, and post-DSI periods
+% 2. 1-minute binning of baseline, post-injection, and post-DSI periods
 % 3. Normalization to both full baseline and last 15-min baseline period
 % 4. Saves both raw and binned/normalized data
 
