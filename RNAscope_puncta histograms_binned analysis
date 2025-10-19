@@ -1,0 +1,1781 @@
+
+clear all
+warning off
+
+% Track sub-cellular puncta per site from in situ hybridazation data for Hunter & Paula
+%% INITIALIZATION and SETUP
+% PLEASE FILL THE FOLLOWING OUT FOR YOUR DATASET:
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%Define base directories
+baseDataDir = '/Users/HL801/Desktop/RNASCOPE/MAIN_EXPRESSION_DATA/Expression_data/';
+dataFolder = [baseDataDir 'DATA_tg/'];
+outFolder='/Users/HL801/Desktop/RNASCOPE/MAIN_EXPRESSION_DATA/Expression_data/Output_threshold=5_11/';
+if ~isfolder(outFolder);mkdir(outFolder);end % Create output directory if it doesn't exist
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Define data source identifiers
+hoStr = {'H' 'R'}; %File prefixes for Hunter vs. Rumi's mice
+theSheets='AS_TT'; % Excel sheet names containing metadata
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Define key experimental variables
+regions={'PVN' 'BLA' 'LA' 'CEC' 'CEL' 'CEM'}; % Brain regions of interest
+% Core transcript list - these will always be indexed 1,2,3 if present
+coreTranscripts = {'CFOS', 'OTR', 'EP2'};
+% But stick with the original transcripts list for processing
+transcripts = coreTranscripts;
+% Treatment conditions
+treatments = {'Saline' 'LPS'};
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Transcript Detection 
+% Run the scanner to find available transcripts
+allTranscriptsFound = scanAvailableTranscripts(dataFolder, hoStr, coreTranscripts);
+fprintf('\nTranscript scanner found: %s\n', strjoin(allTranscriptsFound, ', '));
+
+% Check for additional transcripts
+additionalTranscripts = setdiff(allTranscriptsFound, coreTranscripts);
+
+if ~isempty(additionalTranscripts)
+    fprintf('\nAdditional transcripts detected: %s\n', strjoin(additionalTranscripts, ', '));
+    useAdditional = input('Would you like to include these in the analysis? (y/n): ', 's');
+    
+    if strcmpi(useAdditional, 'y')
+        % Ask which ones to include
+        fprintf('\nSelect additional transcripts to include:\n');
+        includeAdditional = false(1, length(additionalTranscripts));
+        
+        for i = 1:length(additionalTranscripts)
+            response = input(sprintf('%d. %s (y/n): ', i, additionalTranscripts{i}), 's');
+            includeAdditional(i) = strcmpi(response, 'y');
+        end
+        
+        % Add selected transcripts to the analysis list
+        selectedAdditional = additionalTranscripts(includeAdditional);
+        transcripts = [coreTranscripts, selectedAdditional];
+        fprintf('Analysis will include: %s\n', strjoin(transcripts, ', '));
+    else
+        transcripts = coreTranscripts;
+        fprintf('Using only core transcripts: %s\n', strjoin(transcripts, ', '));
+    end
+else
+    transcripts = coreTranscripts;
+    fprintf('No additional transcripts detected. Using core transcripts: %s\n', strjoin(transcripts, ', '));
+end
+
+% Store transcript list in parameters
+analysisParams.expandedTranscripts = transcripts;
+
+
+%% User Input for Analysis Thresholds
+% Initialize default thresholds for each transcript
+defaultThresholds = struct('CFOS', 0, 'OTR', 0, 'EP2', 0);
+useDefaultThresholds = input('Use default thresholds? (y/n): ', 's');
+
+% Add default values for all additional transcripts found
+if ~isempty(additionalTranscripts)
+    for i = 1:length(additionalTranscripts)
+        defaultThresholds.(additionalTranscripts{i}) = 5; % Default value of 5
+    end
+end
+
+
+% Initialize thresholds
+analysisParams = struct();
+analysisParams.thresholds = struct();
+
+if strcmpi(useDefaultThresholds, 'n')
+    % Ask for each transcript separately
+    for i = 1:length(transcripts)
+        % Get default value if exists, otherwise use 5
+        if isfield(defaultThresholds, transcripts{i})
+            defaultVal = defaultThresholds.(transcripts{i});
+        else
+            defaultVal = 5;
+        end
+        
+        prompt = sprintf('Enter threshold for %s (default: %d): ', transcripts{i}, defaultVal);
+        userInput = input(prompt);
+        if ~isempty(userInput) && isnumeric(userInput)
+            analysisParams.thresholds.(transcripts{i}) = userInput;
+        else
+            analysisParams.thresholds.(transcripts{i}) = defaultVal;
+            fprintf('Using default value %d for %s\n', defaultVal, transcripts{i});
+        end
+    end
+else
+    % For default values, make sure we have a threshold for every transcript
+    for i = 1:length(transcripts)
+        if isfield(defaultThresholds, transcripts{i})
+            analysisParams.thresholds.(transcripts{i}) = defaultThresholds.(transcripts{i});
+        else
+            analysisParams.thresholds.(transcripts{i}) = 5; % Default value
+        end
+    end
+    
+    % Print the thresholds
+    fprintf('Using default thresholds: ');
+    for i = 1:length(transcripts)
+        fprintf('%s=%d ', transcripts{i}, analysisParams.thresholds.(transcripts{i}));
+    end
+    fprintf('\n');
+end
+
+% The co-expression threshold will use the transcript-specific threshold
+% so we don't need a separate prompt for it
+
+%% Set analysis parameters
+analysisParams.transcriptsToProcess = 1:3; % [1=CFOS, 2=OTR, 3=EP2], use 1:3 for all
+analysisParams.ranksToProcess = 1:4; % Social ranks to analyze, use 1:4 for all
+analysisParams.treatmentsToProcess = 2; % [1=Saline, 2=LPS], use 1:2 for all
+analysisParams.regionsToProcess = 1:6; % Regions to analyze, use 1:6 for all
+% =====================================================
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+%% DATA PROCESSING
+
+% Initialize main data storage structure
+bigDat=cell(length(regions),2,4); %Dimensions: brainRegions (see above), Saline/LPS, rank 1-4, ([brain regions] x [treatment conditions] x [social rank])
+
+% Debugging %%
+fprintf('BigDat initialized with size: [%d %d %d]\n', size(bigDat,1), size(bigDat,2), size(bigDat,3));
+
+% Initialize section name storage
+bigDat_sectionNames = cell(2,20);
+
+% Enter the data directory
+cd(dataFolder)
+
+% Begin main processing loop across experimental conditions
+theLog = readtable([baseDataDir 'MAIN_AS_TT_MOUSEINFO_2.xlsx'],'Sheet',theSheets);
+
+for folderID=1:2
+
+    % Get list of CSV files for current experimental condition
+    theFiles = dir([dataFolder hoStr{folderID} '*.csv']);
+
+
+fprintf('\nFound %d files to process\n', length(theFiles));
+for i = 1:length(theFiles)
+    fprintf('%s\n', theFiles(i).name);
+end
+
+
+    % Process each CSV file (represents one mouse)
+    for ffID=1:length(theFiles)
+        theFile=theFiles(ffID).name;
+        fprintf('\n%s',theFile) % Print current file for tracking progress
+        
+        %%%%%%%%%%%%%%%%%%%%%
+        % Debugging %%
+        fprintf('\nProcessing file: %s', theFile);
+        fprintf('\nLooking for mouse ID: %s\n', theFile(1:end-4));
+
+        % Print the size and class of relevant variables
+        fprintf('Size of theLog.SubjectID: %s, Class: %s\n', mat2str(size(theLog.SubjectID)), class(theLog.SubjectID));
+        fprintf('First few Subject IDs in theLog:\n');
+        disp(theLog.SubjectID(1:min(5,length(theLog.SubjectID))));
+
+        % Check the thisMouse result
+        thisMouse = strcmp(theLog.SubjectID,theFile(1:end-4));
+        fprintf('Size of thisMouse after strcmp: %s\n', mat2str(size(thisMouse)));
+        fprintf('Number of matches found: %d\n', sum(thisMouse));
+
+        % If there are any matches, show the matching data
+        if any(thisMouse)
+            fprintf('Matched row(s) data:\n');
+            disp(theLog(thisMouse,:));
+        end
+
+        % Check the treatment comparison
+        fprintf('Size of theLog.Treatment(thisMouse): %s\n', mat2str(size(theLog.Treatment(thisMouse))));
+        fprintf('Content of theLog.Treatment(thisMouse):\n');
+        disp(theLog.Treatment(thisMouse));
+        fprintf('Content of treatments variable:\n');
+        disp(treatments);
+        
+        %%%%%%%%%%%%%%%%%%%%%
+        
+        % get info about the mouse
+        thisMouse = strcmp(theLog.SubjectID,theFile(1:end-4));
+        tmpTreat = strcmp(theLog.Treatment(thisMouse),treatments);
+        % Extract social rank information
+        rankHere = theLog.SocialRank_LastDay_{thisMouse};
+        
+        % %%%%%%%%%%%%%%%%%%%%%
+        % % Debugging %%
+        % 
+        % fprintf('Original rankHere: %s\n', rankHere);
+        % 
+        % % Convert rank to number right away but don't use it yet
+        % if iscell(rankHere)
+        %     rankHere = rankHere{1};
+        % end
+        % 
+        % rankNum = str2double(rankHere(isstrprop(rankHere,'digit')));
+        % 
+        % % Add debug print
+        % fprintf('Extracted rank number: %d\n', rankNum);
+        % 
+        % % % Use rankNum instead of rankHere for indexing
+        % % bigDat{rID,find(tmpTreat),rankNum} = cat(1,bigDat{rID,find(tmpTreat),rankNum},...
+        % %     [tmpPunctaCnts [folderID ffID i].*ones(length(tmpPunctaCnts),3)]);
+
+        
+        % REORGANIZE DATA
+        % get indices and names for all the first rows of the data
+        opts = detectImportOptions(theFile, 'TextType', 'string');
+        opts.DataLines = [1, 5]; % Read first 5 lines containing metadata
+        opts = setvartype(opts, 'string'); % Ensure all data read as string
+        T = readtable(theFile,opts);
+        
+        % Transform data structure for easier processing
+        T_cell = table2cell(T).'; % Convert to cell array and transpose, i want to transpose this shit so we can more easily get column indices (eventually)
+        TT = cell2table(T_cell); % Convert back to table format
+        
+        % Extract channel information
+        Channels = TT.T_cell1; % Get channel names
+        [theChannels,~,chInds] = unique(Channels); % Find unique channels
+        
+       
+%% ORGANIZE DATA BY SECTION & INDEX ALL TRANSCRIPTS 
+        
+        % % use SectionID to create indices for each column, here we ask if it's C and then anything numeric...
+        % pattern='^C\d';
+        % matches=find(~cellfun('isempty',regexp(Channels,pattern)));
+
+        % let's organize this in groups of 4
+        newSectionIDs=find(contains(Channels,theFile(1:end-4))); % Find all sections for this mouse
+        newSections = Channels(contains(Channels,theFile(1:end-4))); % Get section names
+        
+        % let's organize this in groups of 4
+        newSectionIDs=find(contains(Channels,theFile(1:end-4))); % Find all sections for this mouse
+        newSections = Channels(contains(Channels,theFile(1:end-4))); % Get section names
+
+        % Create repeated section IDs for all transcripts (groups of 4)
+        newSectionID = repmat(newSectionIDs,[1 4]); % Replicate section IDs
+        newSectionID=newSectionID'; % Transpose to column
+        newSectionID=newSectionID(:); % Convert to single column
+
+        % let's find all CFOS, OTR, EP2 rows (eventually columns)
+        transInds=cell(3,1); % Creates empty cells to store locations for each transcript type
+
+        % Look for each transcript type one at a time
+        for i=1:3
+            % Find where each transcript appears in the Channels variable
+            matches = ~cellfun('isempty', regexpi(Channels, transcripts{i})); % let it be case INsensitive
+            transInds{i}=find(matches);
+        end
+
+        % go through each section and see if it contains all 3 transcripts
+        newSectionIDs=cat(1,newSectionIDs,length(Channels)); % Add endpoint
+        bigInds_bigT=[]; % Initialize array for valid transcript combinations
+
+        % Check each section for presence of all three transcripts
+        for sectionID=1:length(newSectionIDs)-1
+            here = newSectionIDs(sectionID):newSectionIDs(sectionID+1); % Get current section range
+            fprintf('\nChecking section %d (range %d:%d)\n', sectionID, here(1), here(end));
+
+            tmp = zeros(3,1); % Initialize temporary storage
+
+        % Check for each transcript type in current section
+        for j=1:3
+            this = find(ismember(transInds{j},here));
+            fprintf('Transcript %s: ', transcripts{j});
+            if any(this)
+                this = this(1);
+                tmp(j) = transInds{j}(this);
+                fprintf('Found at position %d\n', tmp(j));
+            else
+                fprintf('Not found in this section\n');
+            end
+        end
+
+        % If all transcripts are present, add to valid sections
+        if all(tmp)
+            bigInds_bigT = cat(1,bigInds_bigT,[sectionID*ones(3,1) tmp]);
+            fprintf('Added to bigInds_bigT\n');
+        else
+            fprintf('Section skipped - missing some transcripts\n');
+        end
+    end
+
+    %%%%%%%%%%%%%%%%%%%
+    % Diagnostics
+
+        % After the transcript finding loop
+        fprintf('\nChecking transcript indices:\n');
+        for i=1:3
+            fprintf('Transcript %s found at positions: ', transcripts{i});
+            disp(transInds{i}');
+        end
+
+        % After adding the endpoint
+        fprintf('\nSection ranges to check:\n');
+        for sectionID=1:length(newSectionIDs)-1
+            fprintf('Section %d: %d to %d\n', sectionID, newSectionIDs(sectionID), newSectionIDs(sectionID+1));
+        end
+
+%% READ DATA & ORGANIZE BY BRAIN SECTION
+
+% Set up options for reading the numerical data from the CSV file
+        opts.DataLines = [2, inf]; % Start reading from line 2 to the end
+        opts = setvartype(opts, 'double'); % Convert all data to numerical format
+        bigT = readtable(theFile, opts); % Read the actual data values
+
+        fprintf('\nFinal bigInds_bigT size: [%d %d]\n', size(bigInds_bigT,1), size(bigInds_bigT,2));
+        if isempty(bigInds_bigT)
+            warning('No valid transcript combinations found for mouse %s', theFile);
+            continue;
+        end
+
+        % let's go through each condition, Process sections that were identified as having all three transcripts
+        theseSections=unique(bigInds_bigT(:,1)); % Get unique section identifiers
+        sectionsKeep=newSections(theseSections); % Get names of sections to keep
+        bigDat_sectionNames{folderID,ffID}=sectionsKeep; % Store section names for reference
+        
+        % Initialize cell array to store organized data
+        newBigCell = cell(length(theseSections),1);
+
+        % Extract and organize data for each valid section
+        for sectionID=1:length(theseSections)
+            % Get indices for this section
+            sectionRows = bigInds_bigT(bigInds_bigT(:,1) == theseSections(sectionID), :);
+    
+            % In the original version, we only need the column positions (column 2)
+            transcriptPositions = sectionRows(:,2);  % Column positions in the original data
+    
+            % Extract the data directly using the positions
+            newBigCell{sectionID} = bigT(:, transcriptPositions);
+        end
+        
+        % Now process data for each brain region
+        % get all data for each region and stack it inside the cell for later analysis..
+        for rID=1:length(regions)
+            fprintf('\n\t%s (%d-%d)',regions{rID},folderID,ffID) % Progress tracking
+            tmpBig=[]; % Initialize temporary storage
+
+            % Go through each section
+            for i=1:length(newBigCell)
+
+                % first we get the region this belongs to
+                cmma = strfind(sectionsKeep{i},','); % Find commas in section name
+                dash = strfind(sectionsKeep{i},'-'); % Find dashes in section name
+
+                % Get anatomical position (AP coordinate)
+                apHere=str2double(sectionsKeep{i}(dash(end)+1:end));
+                % if rID>3 % if central amygdala, must be ap < 1.22
+                %     if apHere <= 1.22
+    
+                % Special handling for different file naming conventions
+                        if strcmp(theFile,'HL309.csv')
+                            thisRegion = sectionsKeep{i}(cmma(1)+2:dash-3);
+                        else
+                            if length(cmma)==1
+                                cmma=strfind(sectionsKeep{i},'.');
+                                thisRegion = sectionsKeep{i}(cmma(1)+2:dash-3);
+                            else
+                                thisRegion = sectionsKeep{i}(cmma(2)+2:dash-3);
+                            end
+                        end
+                        % thisRegion = sectionsKeep{i}(cmma(2)+2:cmma(3)-1);
+                        if contains(thisRegion,'P')
+                            rHere=1;
+                        else
+                            rHere=find(strcmp(regions,thisRegion));
+                        end
+                        
+                        
+                        
+                        % Where we're trying to store the data
+                        if rHere==rID 
+                            chHere = sectionsKeep{i};
+                            fprintf('\n\t\t%s',chHere)
+
+                            % Get the data
+                            tmpPunctaCnts = table2array(newBigCell{i});
+                            tmpPunctaCnts(all(isnan(tmpPunctaCnts),2),:)=[];
+    
+                            % Debugging %%
+                            fprintf('Attempting to populate bigDat:\n');
+                            fprintf('rID: %d, tmpTreat: %d, rankHere: %d\n', rID, find(tmpTreat), str2double(rankHere(isstrprop(rankHere,'digit'))));
+                            fprintf('Size of tmpPunctaCnts: [%d %d]\n', size(tmpPunctaCnts,1), size(tmpPunctaCnts,2));
+    
+                            % Convert rank to number if it hasn't been done yet
+                            if iscell(rankHere)
+                                rankHere = rankHere{1};
+                            end
+                            rankNum = str2double(rankHere(isstrprop(rankHere,'digit')));
+
+                            % Check if target cell is empty
+                            if isempty(bigDat{rID,find(tmpTreat),rankNum})
+                            % First data for this region/treatment/rank - initialize
+                                bigDat{rID,find(tmpTreat),rankNum} = [tmpPunctaCnts [folderID ffID i].*ones(length(tmpPunctaCnts),3)];
+                            else
+                            % Cell already contains data - check dimensions
+                                existingData = bigDat{rID,find(tmpTreat),rankNum};
+                                existingCols = size(existingData, 2) - 3; % Subtract the 3 metadata columns
+                                newCols = size(tmpPunctaCnts, 2);
+        
+                                if existingCols == newCols
+                                    % Same number of columns - safe to concatenate
+                                    bigDat{rID,find(tmpTreat),rankNum} = cat(1, existingData, [tmpPunctaCnts [folderID ffID i].*ones(length(tmpPunctaCnts),3)]);
+                                else
+                                    fprintf('WARNING: Column count mismatch. Existing: %d, New: %d. Skipping this section.\n', existingCols, newCols);
+                                    fprintf('This indicates transcripts are inconsistent across sections.\n');
+                                % Alternative: Pad with NaNs to make columns match
+                                % But this is probably a sign of a deeper issue with transcript mapping
+                                end
+                            end
+                            % Debugging %%
+                            fprintf('New size of bigDat cell: [%d %d]\n', size(bigDat{rID,find(tmpTreat),rankNum},1), size(bigDat{rID,find(tmpTreat),rankNum},2));
+                        end
+
+                %     end
+                % else
+                %     if strcmp(theFile,'HL309.csv')
+                %         thisRegion = sectionsKeep{i}(cmma(1)+2:dash-3);
+                %     else
+                %         if length(cmma)==1
+                %             cmma=strfind(sectionsKeep{i},'.');
+                %             thisRegion = sectionsKeep{i}(cmma(1)+2:dash-3);
+                %         else
+                %             thisRegion = sectionsKeep{i}(cmma(2)+2:dash-3);
+                %         end
+                %     end
+                %     % thisRegion = sectionsKeep{i}(cmma(2)+2:cmma(3)-1);
+                %     if contains(thisRegion,'P')
+                %         rHere=1;
+                %     else
+                %         rHere=find(strcmp(regions,thisRegion));
+                %     end
+                % 
+                %     if rHere==rID 
+                %         chHere = sectionsKeep{i};
+                %         fprintf('\n\t\t%s',chHere)
+                % 
+                %         tmpPunctaCnts=table2array(newBigCell{i});
+                %         tmpPunctaCnts(all(isnan(tmpPunctaCnts),2),:)=[];
+                %         % store data, keeping track of folder, file, and section information...
+                %         bigDat{rID,tmpTreat,rankHere} = cat(1,bigDat{rID,tmpTreat,rankHere},[tmpPunctaCnts [folderID ffID i].*ones(length(tmpPunctaCnts),3)]); 
+                % 
+                %     end
+                % end
+            end
+        end
+
+        % Debugging %%
+        fprintf('\nFile processing complete. Checking content:\n');
+for r=1:6
+    for t=1:2
+        for k=1:4
+            if ~isempty(bigDat{r,t,k})
+                fprintf('Region %d, Treatment %d, Rank %d: Size [%d %d]\n', r, t, k, size(bigDat{r,t,k},1), size(bigDat{r,t,k},2));
+            end
+        end
+    end
+end
+
+
+
+
+    end
+end
+
+
+
+
+% diary off
+% finder(outFolder)
+
+
+save([outFolder 'BigData_16nov2024.mat'],'bigDat','bigDat_sectionNames')
+
+
+% save([outFolder 'BigData_9to122.mat'],'bigDat','bigDat_sectionNames')
+
+%% now let's go through and plot the proportion of cells positive for each transcript
+% % transcripts = {'CFOS' 'OTR' 'EP2'};
+% trColor={'b' 'r'};
+% scrSize=get(0,'screensize');
+% aa=figure('position',[1 1 .3 1].*scrSize,'color','w','InvertHardcopy','off');% the data
+% bb=figure('position',[.3*scrSize(3) 1 .3 1].*scrSize,'color','w','InvertHardcopy','off');% the cell cnt..
+% for rID=1:6
+%     for trID=1:3
+%         for treatID=1:2
+%             tmpR=nan(4,2);
+%             for rankID=1:4
+%                 % go through each section
+%                 [a,b,c]=unique(bigDat{rID,treatID,rankID}(:,4:6),'rows');
+%                 tmpHere=nan(length(a),1);
+%                 for secID=1:length(a)
+%                     tmp=bigDat{rID,treatID,rankID}(c==secID,trID);
+%                     tmpHere(secID)=sum(tmp>0)/length(tmp);
+%                 end
+%                 tmpR(rankID,1)=mean(tmpHere);
+%                 tmpR(rankID,2)=std(tmpHere)/sqrt(length(tmpHere));
+% 
+%                 figure(bb)
+%                 subplot(6,3,3*(rID-1)+trID);hold on
+%                 x=3*(rankID-1)+treatID;
+%                 yyaxis left
+%                 [aaa,bbb,ccc]=unique(a(:,1:2),'rows');
+%                 bar(x,size(aaa,1),'facecolor',trColor{treatID})
+%                 cnts=histcounts(ccc,1:(size(aaa,1)+1));
+%                 ylabel('# of mice (bars)')
+%                 set(gca,'ycolor','k')
+%                 yyaxis right
+%                 if length(cnts)>1
+%                     plot(linspace(x-.1,x+.1,length(cnts)),cnts,'ok','markerfacecolor','k')
+%                 else
+%                     plot(x,cnts,'ok','markerfacecolor','k')
+%                 end
+%                 set(gca,'xtick',1.5:3:10.5,'xticklabel',1:4)
+%                 xlabel('rank')
+%                 ylabel('# of sections (dots)')
+%                 set(gca,'ycolor','k')
+%                 axis tight
+%                 yHere=ylim;
+%                 ylim([0 yHere(2)])
+%                 xlim([0 12])
+%             end
+%             figure(aa)
+%             subplot(6,3,3*(rID-1)+trID);hold on
+%             errorbar(1:4,tmpR(:,1),tmpR(:,2),['-' trColor{treatID}],'linewidth',3)
+%             xlim([0.5 4.5])
+%             ylim([0 1])
+%             set(gca,'xtick',1:4,'fontsize',12)
+%             xlabel('Rank')
+%             ylabel(sprintf('p(cells w %s)',transcripts{trID}))
+%             title(sprintf('%s %s',regions{rID},transcripts{trID}),'fontsize',15)
+%         end
+%     end
+% end
+% figure(aa);sgtitle('\color{blue}Saline \color{red}LPS','fontsize',25)
+% figure(bb);sgtitle('\color{blue}Saline \color{red}LPS','fontsize',25)
+% print(aa,[outFolder 'PropPerTranscript.png'],'-dpng')
+% print(bb,[outFolder 'MouseAndSectionsPerTranscript.png'],'-dpng')
+
+%%
+% diary on
+% diary([outFolder 'theSections.txt'])
+
+% ARE THERE ANY MISSING REGION X TREATMENT X RANK combos? 
+
+fprintf('Checking empty cells in bigDat:\n\n');
+
+% Initialize counters for statistics
+totalCells = 0;
+emptyCells = 0;
+
+% Check each dimension
+for rID = 1:6  % regions
+    fprintf('\nRegion: %s\n', regions{rID});
+    for treatID = 1:2  % treatments
+        fprintf('\n  Treatment: %s\n', treatments{treatID});
+        for rankID = 1:4  % ranks
+            totalCells = totalCells + 1;
+            
+            % Check if cell is empty and get its size
+            cellContent = bigDat{rID,treatID,rankID};
+            if isempty(cellContent)
+                emptyCells = emptyCells + 1;
+                fprintf('    Rank %d: EMPTY\n', rankID);
+            else
+                fprintf('    Rank %d: Size [%d x %d]\n', rankID, size(cellContent,1), size(cellContent,2));
+            end
+        end
+    end
+end
+
+% Print summary statistics
+fprintf('\nSummary:\n');
+fprintf('Total cells: %d\n', totalCells);
+fprintf('Empty cells: %d (%.1f%%)\n', emptyCells, (emptyCells/totalCells)*100);
+
+
+
+
+
+
+TTT=table;
+filename=[outFolder 'SectionInclusion_16nov2024.xlsx'];
+for rID=1:6
+    tt=table;
+    for rankID=1:4
+        for treatID=1:2
+            % Check if we have data and it has enough columns
+            if ~isempty(bigDat{rID,treatID,rankID}) && size(bigDat{rID,treatID,rankID}, 2) >= 6
+                % Debugging: 
+                [a,b,c]=unique(bigDat{rID,treatID,rankID}(:,4:6),'rows');
+                fprintf('\n%s %s Rank %d',regions{rID},treatments{treatID},rankID);
+                fprintf('  Number of sections found: %d\n', size(a,1));
+                
+                % Create the column name
+                colName = [regions{rID} '_Rank' num2str(rankID) '_' treatments{treatID}];
+                
+                % Process sections one by one
+                for i=1:size(a,1)
+                    % Check if indices are valid before accessing
+                    if a(i,1) > 0 && a(i,1) <= size(bigDat_sectionNames,1) && ...
+                       a(i,2) > 0 && a(i,2) <= size(bigDat_sectionNames,2) && ...
+                       iscell(bigDat_sectionNames{a(i,1),a(i,2)}) && ...
+                       a(i,3) > 0 && a(i,3) <= length(bigDat_sectionNames{a(i,1),a(i,2)})
+                        
+                        fprintf('\n\t%s',bigDat_sectionNames{a(i,1),a(i,2)}(a(i,3)));
+                        TTT.(colName){i} = bigDat_sectionNames{a(i,1),a(i,2)}(a(i,3));
+                        tt.(colName){i} = bigDat_sectionNames{a(i,1),a(i,2)}(a(i,3));
+                    else
+                        fprintf('\n\tWARNING: Invalid indices [%d,%d,%d] for bigDat_sectionNames', a(i,1), a(i,2), a(i,3));
+                        sectionName = sprintf('Unknown_Section_%d_%d_%d', a(i,1), a(i,2), a(i,3));
+                        TTT.(colName){i} = sectionName;
+                        tt.(colName){i} = sectionName;
+                    end
+                end
+            else
+                fprintf('\n%s %s Rank %d - Insufficient data', regions{rID}, treatments{treatID}, rankID);
+                if ~isempty(bigDat{rID,treatID,rankID})
+                    fprintf(' (columns: %d)', size(bigDat{rID,treatID,rankID}, 2));
+                else
+                    fprintf(' (empty cell)');
+                end
+                fprintf('\n');
+            end
+        end
+    end
+    writetable(tt, filename,'Sheet',regions{rID})
+end
+disp(['Output saved to: ' outFolder])
+writetable(TTT, filename,'sheet','ALL')
+
+
+%% now we look within Rank, we map the histograms of cells with whatever number of puncta, bin size = 2 , comparaing LPS/Sal
+trColor={'b' 'r'};
+% yHere=[.9 .7 .5];
+yHere=[.7 .5 .3];
+% yHere=[.2 .2 .2];
+scrSize=get(0,'screensize');
+nRows=nan(3,1);
+for trID=1:3
+    nnTmp=[];
+    aa=figure('position',[.33*(scrSize(3))*(trID-1) 1 .33 1].*scrSize,'color','w','InvertHardcopy','off');% the data
+    for rID=4:6
+        for rankID=1:4
+            subplot(3,4,4*(rID-4)+rankID);hold on
+            % subplot(3,4,4*(rID-1)+rankID);hold on
+            for treatID=1:2
+                % go through each section
+                [a,b,c]=unique(bigDat{rID,treatID,rankID}(:,4:6),'rows');
+                tmpHere=nan(size(a,1),1000);
+                for secID=1:size(a,1)
+                    tmp=bigDat{rID,treatID,rankID}(c==secID,trID);
+                    if max(tmp)>0
+                        this=histcounts(tmp,0:1:max(tmp));
+                        % this=histcounts(tmp,0.001:1:max(tmp));
+                        this=this/sum(this);
+                        tmpHere(secID,1:length(this))=this;
+                    end
+                end
+                tmpHere(:,all(isnan(tmpHere)))=[];
+                nnTmp=cat(1,nnTmp,length(tmpHere));
+                tmpM=mean(tmpHere,'omitnan');
+                tmpS=std(tmpHere,'omitnan')./sqrt(sum(~isnan(tmpHere)));
+                errorbar(((1:length(tmpM))-.5)+.15*(treatID-1),tmpM,tmpS,['-' trColor{treatID}],'linewidth',3)
+            end
+            xlim([0 18])
+            % ylim([0 yHere(trID)])
+            set(gca,'fontsize',15)
+            xlabel('# of puncta')
+            ylabel('# of cells')
+            title(sprintf('%s Rank %d',regions{rID},rankID),'fontsize',20)
+        end
+    end
+    nRows(trID)=max(nnTmp);
+    figure(aa);sgtitle({transcripts{trID};'\color{blue}Saline \color{red}LPS'},'fontsize',30)
+    print(aa,[outFolder transcripts{trID} '_binnedCnts_CeA_Range1.png'],'-dpng')
+end
+
+%% plot for individual mice, region by region..name it as Rank_Drug_Name
+trColor={'b' 'r'};
+% yHere=[.9 .7 .5];
+yHere=[.7 .5 .3];
+% yHere=[.2 .2 .2];
+scrSize=get(0,'screensize');
+
+% Create output directories if they don't exist
+mouseByMouseDir = [outFolder 'MouseByMouse_TighterRange/'];
+if ~isfolder(mouseByMouseDir)
+    mkdir(mouseByMouseDir);
+end
+
+% Create directory for CSV outputs
+csvDir = [outFolder 'MouseByMouse_CSV/'];
+if ~isfolder(csvDir)
+    mkdir(csvDir);
+end
+
+% Initialize overall CSV data table
+allMouseData = table('Size', [0, 8], 'VariableTypes', {'string', 'double', 'string', 'string', 'string', 'double', 'double', 'double'}, ...
+                    'VariableNames', {'MouseID', 'Rank', 'Treatment', 'Region', 'Transcript', 'PunctaCount', 'Proportion', 'SEM'});
+
+% Print diagnostic information about available data
+fprintf('\n----- Data availability by rank and treatment -----\n');
+for rankID=1:4
+    for treatID=1:2
+        count = 0;
+        miceNames = {};
+        for rID=1:6
+            % Count unique mice for this combination
+            [a,~,~] = unique(bigDat{rID,treatID,rankID}(:,4:5), 'rows');
+            if ~isempty(a)
+                for i=1:size(a,1)
+                    if a(i,2) <= length(dir([dataFolder hoStr{a(i,1)} '*.csv']))
+                        theFiles = dir([dataFolder hoStr{a(i,1)} '*.csv']);
+                        mouseName = theFiles(a(i,2)).name(1:end-4);
+                        if ~ismember(mouseName, miceNames)
+                            miceNames{end+1} = mouseName;
+                            count = count + 1;
+                        end
+                    end
+                end
+            end
+        end
+        fprintf('Rank %d, %s: %d mice (%s)\n', rankID, treatments{treatID}, count, strjoin(miceNames, ', '));
+    end
+end
+
+% Use analysis parameters for processing
+for rankIdx = 1:length(analysisParams.ranksToProcess)
+    rankID = analysisParams.ranksToProcess(rankIdx);
+    
+    for treatIdx = 1:length(analysisParams.treatmentsToProcess)
+        treatID = analysisParams.treatmentsToProcess(treatIdx);
+        ss=[];
+        for rID=1:6
+            [a,b,c]=unique(bigDat{rID,treatID,rankID}(:,4:5),'rows');
+            ss=cat(1,ss,a);
+        end
+        ss=unique(ss,'rows');
+        
+        % Print number of mice found for this rank/treatment
+        fprintf('Rank %d, Treatment %s: found %d mice\n', rankID, treatments{treatID}, size(ss,1));
+        
+        for subjID=1:size(ss,1)
+            % Use the same data directory defined at the beginning
+            theFiles = dir([dataFolder hoStr{ss(subjID,1)} '*.csv']);
+            
+            % Add bounds checking
+            if ss(subjID,2) <= length(theFiles)
+                mouseTitle = theFiles(ss(subjID,2)).name(1:end-4);
+            else
+                % Fallback if index is still out of bounds
+                mouseTitle = sprintf('Subject_%d_%d', ss(subjID,1), ss(subjID,2));
+                fprintf('Warning: Index %d exceeds theFiles length %d for folderID %d\n', ss(subjID,2), length(theFiles), ss(subjID,1));
+            end
+            
+            % Initialize mouse data table
+            mouseData = table('Size', [0, 8], 'VariableTypes', {'string', 'double', 'string', 'string', 'string', 'double', 'double', 'double'}, ...
+                            'VariableNames', {'MouseID', 'Rank', 'Treatment', 'Region', 'Transcript', 'PunctaCount', 'Proportion', 'SEM'});
+            
+            % Create figure
+            aa=figure('position',scrSize,'color','w','InvertHardcopy','off');% the data
+            
+            % Track whether any valid data was plotted
+            hasData = false;
+            
+            for rIdx = 1:length(analysisParams.regionsToProcess)
+                rID = analysisParams.regionsToProcess(rIdx);
+    
+                for trIdx = 1:length(analysisParams.transcriptsToProcess)
+                    trID = analysisParams.transcriptsToProcess(trIdx);
+                    % Debug - report what we're working on
+                    fprintf('Processing Mouse: %s, Region: %s, Transcript: %s\n', mouseTitle, regions{rID}, transcripts{trID});
+                    
+                    % go through each section
+                    these=all(ismember(bigDat{rID,treatID,rankID}(:,4:5),ss(subjID,:)),2);
+                    newDat=bigDat{rID,treatID,rankID}(these,:);
+                    
+                    subplot(3,6,6*(trID-1)+rID);
+                    
+                    if ~isempty(newDat)
+                        [a,b,c] = unique(newDat(:,6));
+                        
+                        if ~isempty(a)  % Check if there are any sections
+                            tmpHere=nan(size(a,1),1000);
+                            for secID=1:size(a,1)
+                                tmp=newDat(c==secID,trID);
+                                if max(tmp)>0
+                                    this=histcounts(tmp,0:1:max(tmp));
+                                    this=this/sum(this);
+                                    tmpHere(secID,1:length(this))=this;
+                                end
+                            end
+                            tmpHere(:,all(isnan(tmpHere)))=[];
+                            
+                            if ~isempty(tmpHere) && ~all(isnan(tmpHere(:)))
+                                tmpM=mean(tmpHere,'omitnan');
+                                tmpS=std(tmpHere,'omitnan')./sqrt(sum(~isnan(tmpHere)));
+                                
+                                % Store data in table
+                                for i = 1:length(tmpM)
+                                    newRow = {mouseTitle, rankID, treatments{treatID}, regions{rID}, transcripts{trID}, i-1, tmpM(i), tmpS(i)};
+                                    mouseData = [mouseData; newRow];
+                                end
+                                
+                                % Plot data
+                                hold on
+                                yyaxis left
+                                errorbar(((1:length(tmpM))-.5),tmpM,tmpS,['-' trColor{treatID}],'linewidth',3)
+                                xlim([1 18])
+                                ylim([0 .3])
+                                xlabel(['# of ' transcripts{trID} ' puncta'])
+                                ylabel('proportion of cells')
+                                yyaxis right
+                                tmpN=sum(~isnan(tmpHere));
+                                plot(((1:length(tmpM))-.5),tmpN,'-ok','linewidth',2)
+                                set(gca,'fontsize',18,'ycolor','k')
+                                ylabel('# of sections')
+                                
+                                hasData = true;
+                            else
+                                text(0.5, 0.5, 'No valid data', 'HorizontalAlignment', 'center');
+                            end
+                        else
+                            text(0.5, 0.5, 'No sections found', 'HorizontalAlignment', 'center');
+                        end
+                    else
+                        text(0.5, 0.5, 'No data for this region', 'HorizontalAlignment', 'center');
+                    end
+                    
+                    title(sprintf('%s',regions{rID}),'fontsize',22)
+                end
+            end
+            
+            % Use the safe title
+            sgtitle(sprintf('%s Rank %d %s', mouseTitle, rankID, treatments{treatID}), 'fontsize', 45)
+            
+            % Make sure the figure is fully drawn before saving
+            drawnow;
+            
+            if hasData
+                fprintf('Saving figure with data to: %s\n', [mouseByMouseDir 'Rank' num2str(rankID) '_' treatments{treatID} '_' mouseTitle '.png']);
+                
+                % Save mouse-specific CSV
+                if height(mouseData) > 0
+                    writetable(mouseData, [csvDir mouseTitle '_Rank' num2str(rankID) '_' treatments{treatID} '.csv']);
+                    % Add to overall data
+                    allMouseData = [allMouseData; mouseData];
+                end
+            else
+                fprintf('Warning: Figure has no data but will be saved: %s\n', [mouseByMouseDir 'Rank' num2str(rankID) '_' treatments{treatID} '_' mouseTitle '.png']);
+            end
+            
+            % Use the same variable for the output filename
+            print(aa, [mouseByMouseDir 'Rank' num2str(rankID) '_' treatments{treatID} '_' mouseTitle '.png'], '-dpng')
+            close all
+        end
+    end
+end
+
+% Save combined data
+if height(allMouseData) > 0
+    writetable(allMouseData, [outFolder 'AllMouseData.csv']);
+    fprintf('Combined data saved to: %s\n', [outFolder 'AllMouseData.csv']);
+end
+
+disp(['Output saved to: ' mouseByMouseDir]);
+disp(['CSV data saved to: ' csvDir]);
+
+
+%% make excel for ioana
+filename = [outFolder 'excelForIoana_16nov2024.xlsx'];
+% nRows=nan(3,1);
+for trID=1:3
+    TT=table();
+    % Add row labels first (before any other columns)
+    if ~isnan(nRows(trID))
+        TT.PunctaCount = (0:nRows(trID)-1)';
+    end
+    
+    for rID=4:6
+        for rankID=1:4
+            for treatID=1:2
+                % Skip if data is missing or insufficient
+                if isempty(bigDat{rID,treatID,rankID}) || size(bigDat{rID,treatID,rankID}, 2) < 6
+                    fprintf('Skipping %s Rank %d %s - Insufficient data\n', regions{rID}, rankID, treatments{treatID});
+                    continue;
+                end
+                
+                % go through each section
+                [a,b,c]=unique(bigDat{rID,treatID,rankID}(:,4:6),'rows');
+                tmpHere=nan(size(a,1),1000);
+                for secID=1:size(a,1)
+                    if trID <= size(bigDat{rID,treatID,rankID}, 2)-3 % Check if transcript column exists
+                        tmp=bigDat{rID,treatID,rankID}(c==secID,trID);
+                        if max(tmp)>0
+                            this=histcounts(tmp,0:1:max(tmp));
+                            this=this/sum(this);
+                            tmpHere(secID,1:length(this))=this;
+                        end
+                    end
+                end
+                tmpHere(:,all(isnan(tmpHere)))=[];
+                
+                if ~isempty(tmpHere)
+                    tmpM=mean(tmpHere,'omitnan');
+                    tmpS=std(tmpHere,'omitnan')./sqrt(sum(~isnan(tmpHere)));
+
+                    newTmpM=nan(nRows(trID),1);
+                    newTmpM(1:length(tmpM))=tmpM;
+                    newTmpS=nan(nRows(trID),1);newTmpS(1:length(tmpS))=tmpS;
+
+                    TT.([regions{rID} '_Rank' num2str(rankID) '_' treatments{treatID} '_Mean'])(1:nRows(trID)) = newTmpM;
+                    TT.([regions{rID} '_Rank' num2str(rankID) '_' treatments{treatID} '_SEM'])(1:nRows(trID)) = newTmpS;
+                end
+            end
+        end
+    end
+    writetable(TT, filename, 'Sheet', transcripts{trID});
+end
+disp(['Output saved to: ' outFolder])
+
+
+%% Process co-expression with per-mouse output and flexibility
+% Create directories
+coexpDir = [outFolder 'CoExpression_CSV/'];
+coexpMouseDir = [outFolder 'CoExpression_MouseByMouse/'];
+if ~isfolder(coexpDir); mkdir(coexpDir); end
+if ~isfolder(coexpMouseDir); mkdir(coexpMouseDir); end
+
+% Define x-axis limits for different transcripts (can be extended for more transcripts)
+xHere = zeros(1, length(transcripts));
+for i = 1:length(transcripts)
+    if strcmpi(transcripts{i}, 'CFOS')
+        xHere(i) = 20;
+    elseif strcmpi(transcripts{i}, 'OTR')
+        xHere(i) = 25; 
+    elseif strcmpi(transcripts{i}, 'EP2')
+        xHere(i) = 40;
+    else
+        xHere(i) = 25; % Default for unknown transcripts
+    end
+end
+
+% Allow user to select primary transcript
+fprintf('\nSelect primary transcript for co-expression:\n');
+for i = 1:length(transcripts)
+    fprintf('%d. %s\n', i, transcripts{i});
+end
+primaryIdx = input('Enter transcript number (default is CFOS): ');
+if isempty(primaryIdx) || primaryIdx < 1 || primaryIdx > length(transcripts)
+    % Find CFOS index or default to first transcript
+    cfosIdx = find(strcmpi(transcripts, 'CFOS'));
+    if ~isempty(cfosIdx)
+        primaryIdx = cfosIdx(1);
+    else
+        primaryIdx = 1;
+    end
+end
+primaryTranscript = transcripts{primaryIdx};
+fprintf('Using %s as primary transcript\n', primaryTranscript);
+
+% Get the threshold for the primary transcript
+if isfield(analysisParams, 'thresholds') && isfield(analysisParams.thresholds, primaryTranscript)
+    minVal = analysisParams.thresholds.(primaryTranscript);
+else
+    minVal = analysisParams.coexpMinValue;
+end
+fprintf('Using threshold > %d for %s\n', minVal, primaryTranscript);
+
+% Ask if user wants to analyze all transcript combinations
+fprintf('\nAnalyze all possible transcript combinations? (y/n): ');
+analyzeAllCombos = lower(input('', 's'));
+if analyzeAllCombos == 'y'
+    % Process all pairs excluding self-comparisons
+    combos = {};
+    for i = 1:length(transcripts)
+        for j = 1:length(transcripts)
+            if i ~= j
+                combos{end+1} = [i, j]; % [primary, secondary]
+            end
+        end
+    end
+    fprintf('Will analyze %d transcript combinations\n', length(combos));
+else
+    % Only process combinations with the selected primary transcript
+    combos = {};
+    for i = 1:length(transcripts)
+        if i ~= primaryIdx
+            combos{end+1} = [primaryIdx, i]; % [primary, secondary]
+        end
+    end
+    fprintf('Will analyze %d combinations with %s as primary\n', length(combos), primaryTranscript);
+end
+
+% Ask which regions to include
+fprintf('\nSelect regions for co-expression analysis:\n');
+fprintf('1. Central amygdala only (CEC, CEL, CEM)\n');
+fprintf('2. All regions\n');
+fprintf('3. Custom selection\n');
+regionChoice = input('Enter choice (default is 1): ');
+
+if isempty(regionChoice) || regionChoice == 1
+    % Central amygdala only
+    regionList = analysisParams.regionsToProcess(analysisParams.regionsToProcess >= 4 & analysisParams.regionsToProcess <= 6);
+    fprintf('Using central amygdala regions\n');
+elseif regionChoice == 2
+    % All regions
+    regionList = analysisParams.regionsToProcess;
+    fprintf('Using all regions\n');
+else
+    % Custom selection
+    fprintf('\nSelect regions to include:\n');
+    for i = 1:length(regions)
+        fprintf('%d. %s\n', i, regions{i});
+    end
+    customRegions = input('Enter region numbers (e.g., [1 3 4]): ');
+    if isempty(customRegions)
+        regionList = analysisParams.regionsToProcess;
+    else
+        regionList = customRegions;
+    end
+    fprintf('Using selected regions\n');
+end
+
+% Process each transcript combination
+for combo = 1:length(combos)
+    % Get primary and secondary transcript indices
+    primaryIdx = combos{combo}(1);
+    secondaryIdx = combos{combo}(2);
+    
+    primaryTranscript = transcripts{primaryIdx};
+    secondaryTranscript = transcripts{secondaryIdx};
+    
+    fprintf('\nProcessing: %s (primary) with %s (secondary)\n', primaryTranscript, secondaryTranscript);
+    
+    % Get threshold for this primary transcript
+    if isfield(analysisParams, 'thresholds') && isfield(analysisParams.thresholds, primaryTranscript)
+        minVal = analysisParams.thresholds.(primaryTranscript);
+    else
+        minVal = analysisParams.coexpMinValue;
+    end
+    
+    % Initialize combined data table
+    allCoexpData = table('Size', [0, 8], 'VariableTypes', {'string', 'string', 'double', 'string', 'double', 'double', 'double', 'double'}, ...
+                     'VariableNames', {'MouseID', 'Region', 'Rank', 'Treatment', 'PunctaCount', 'CoExpressionProportion', 'SEM', 'NumSections'});
+    
+    % For each rank and treatment combination
+    for rankIdx = 1:length(analysisParams.ranksToProcess)
+        rankID = analysisParams.ranksToProcess(rankIdx);
+        for treatIdx = 1:length(analysisParams.treatmentsToProcess)
+            treatID = analysisParams.treatmentsToProcess(treatIdx);
+            
+            % Find all mice in this rank/treatment combination
+            ss = [];
+            for rIdx = 1:length(regionList)
+                rID = regionList(rIdx);
+                if rID <= length(regions) && rID > 0 && ...
+                   treatID <= 2 && rankID <= 4 && ...
+                   ~isempty(bigDat{rID,treatID,rankID}) && ...
+                   size(bigDat{rID,treatID,rankID}, 2) >= 6
+                    [a,~,~] = unique(bigDat{rID,treatID,rankID}(:,4:5),'rows');
+                    ss = cat(1, ss, a);
+                end
+            end
+            ss = unique(ss,'rows');
+            
+            if isempty(ss)
+                fprintf('No mice found for Rank %d, Treatment %s\n', rankID, treatments{treatID});
+                continue;
+            end
+            
+            % Process each mouse
+            for subjID = 1:size(ss,1)
+                % Get mouse ID
+                if ss(subjID,2) <= length(dir([dataFolder hoStr{ss(subjID,1)} '*.csv']))
+                    theFiles = dir([dataFolder hoStr{ss(subjID,1)} '*.csv']);
+                    mouseTitle = theFiles(ss(subjID,2)).name(1:end-4);
+                else
+                    mouseTitle = sprintf('Subject_%d_%d', ss(subjID,1), ss(subjID,2));
+                end
+                
+                % Initialize mouse-specific data
+                mouseData = table('Size', [0, 7], 'VariableTypes', {'string', 'double', 'string', 'double', 'double', 'double', 'double'}, ...
+                                 'VariableNames', {'Region', 'Rank', 'Treatment', 'PunctaCount', 'CoExpressionProportion', 'SEM', 'NumSections'});
+                
+                % Create figure for this mouse
+                figTitle = sprintf('%s: %s with %s (min=%d)', mouseTitle, secondaryTranscript, primaryTranscript, minVal);
+                aa = figure('Name', figTitle, 'Position', get(0,'ScreenSize'));
+                
+                % Determine subplot grid based on number of regions
+                numRegions = length(regionList);
+                if numRegions <= 3
+                    nRows = 1;
+                    nCols = numRegions;
+                else
+                    nRows = ceil(numRegions/3);
+                    nCols = min(3, numRegions);
+                end
+                
+                % Process each region
+                hasData = false;
+                for rIdx = 1:length(regionList)
+                    rID = regionList(rIdx);
+                    if rID > length(regions) || rID < 1
+                        continue; % Skip invalid regions
+                    end
+                    
+                    subplot(nRows, nCols, rIdx);
+                    hold on;
+                    
+                    % Get data for this mouse/region
+                    if treatID > size(bigDat, 2) || rankID > size(bigDat, 3) || ...
+                       isempty(bigDat{rID,treatID,rankID})
+                        text(0.5, 0.5, 'No data', 'HorizontalAlignment', 'center', 'FontSize', 14);
+                        continue;
+                    end
+                    
+                    these = all(ismember(bigDat{rID,treatID,rankID}(:,4:5), ss(subjID,:)), 2);
+                    newDat = bigDat{rID,treatID,rankID}(these,:);
+                    
+                    if ~isempty(newDat) && size(newDat,2) >= max(primaryIdx, secondaryIdx)
+                        % Process sections
+                        [a,b,c] = unique(newDat(:,6));
+                        tmpHere = nan(length(a),1000);
+                        tmpN = nan(length(a),1000);
+                        
+                        for secID = 1:length(a)
+                            if secID > length(c)
+                                continue; % Skip if section ID is invalid
+                            end
+                            
+                            secondaryData = newDat(c==secID,secondaryIdx);
+                            if ~isempty(secondaryData) && max(secondaryData) > 0
+                                [this,~,ii] = histcounts(secondaryData,0:1:max(secondaryData));
+                                
+                                for binID = 1:length(this)
+                                    primaryData = newDat(c==secID,primaryIdx);
+                                    primaryInBin = primaryData(ii==binID);
+                                    
+                                    if ~isempty(primaryInBin)
+                                        coexprProportion = sum(primaryInBin > minVal)/length(primaryInBin);
+                                        tmpHere(secID,binID) = coexprProportion;
+                                        tmpN(secID,binID) = length(primaryInBin);
+                                    end
+                                end
+                            end
+                        end
+                        
+                        % Process data if we have any
+                        rmThis = all(isnan(tmpHere));
+                        tmpHere(:,rmThis) = [];
+                        
+                        if ~isempty(tmpHere) && ~all(isnan(tmpHere(:)))
+                            tmpM = mean(tmpHere,'omitnan');
+                            tmpS = std(tmpHere,'omitnan')./sqrt(sum(~isnan(tmpHere)));
+                            numSections = sum(~isnan(tmpHere));
+                            
+                            % Add to mouse data
+                            for i = 1:length(tmpM)
+                                if ~isnan(tmpM(i))
+                                    newRow = {regions{rID}, rankID, treatments{treatID}, i-1, tmpM(i), tmpS(i), numSections(i)};
+                                    mouseData = [mouseData; newRow];
+                                    
+                                    % Also add to combined data with mouse ID
+                                    combinedRow = {mouseTitle, regions{rID}, rankID, treatments{treatID}, i-1, tmpM(i), tmpS(i), numSections(i)};
+                                    allCoexpData = [allCoexpData; combinedRow];
+                                end
+                            end
+                            
+                            % Plot
+                            errorbar(((1:length(tmpM))-.5), tmpM, tmpS, '-o', 'LineWidth', 2);
+                            title(sprintf('%s', regions{rID}), 'FontSize', 16);
+                            xlabel(['# of ' secondaryTranscript ' puncta'], 'FontSize', 14);
+                            ylabel(['% ' primaryTranscript '+ cells (>' num2str(minVal) ' puncta)'], 'FontSize', 14);
+                            if secondaryIdx <= length(xHere)
+                                xlim([0 xHere(secondaryIdx)]);
+                            else
+                                xlim([0 20]);
+                            end
+                            ylim([0 1]);
+                            set(gca, 'FontSize', 12);
+                            hasData = true;
+                        else
+                            text(0.5, 0.5, 'No data', 'HorizontalAlignment', 'center', 'FontSize', 14);
+                        end
+                    else
+                        text(0.5, 0.5, 'No data', 'HorizontalAlignment', 'center', 'FontSize', 14);
+                    end
+                end
+                
+                % Add overall title and save
+                sgtitle(figTitle, 'FontSize', 18);
+                
+                % Save mouse-specific data
+                if hasData && height(mouseData) > 0
+                    csvPath = [coexpMouseDir mouseTitle '_' secondaryTranscript '_' primaryTranscript '_minVal' num2str(minVal) '.csv'];
+                    writetable(mouseData, csvPath);
+                    
+                    % Save figure
+                    figPath = [coexpMouseDir mouseTitle '_' secondaryTranscript '_' primaryTranscript '_minVal' num2str(minVal) '.png'];
+                    print(aa, figPath, '-dpng');
+                    
+                    fprintf('Processed mouse %s\n', mouseTitle);
+                end
+                
+                close(aa);
+            end
+        end
+    end
+    
+    % Save combined data for this transcript pair
+    if height(allCoexpData) > 0
+        csvPath = [coexpDir secondaryTranscript '_' primaryTranscript '_AllMice_minVal' num2str(minVal) '.csv'];
+        writetable(allCoexpData, csvPath);
+        fprintf('Saved combined data to: %s\n', csvPath);
+    else
+        fprintf('No data saved for %s with %s combination\n', secondaryTranscript, primaryTranscript);
+    end
+end
+
+disp(['Co-expression analysis complete. Mouse-by-mouse data saved to: ' coexpMouseDir]);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fprintf('\n===== GENERATING BINNED ANALYSIS SHEETS =====\n');
+
+% Create output directory
+binnedDir = [outFolder 'Binned_Analysis_Sheets/'];
+if ~isfolder(binnedDir); mkdir(binnedDir); end
+
+% Define binning parameters - will create two versions with different bin sizes
+binSizes = [10, 20]; % Small bins (10 puncta) and larger bins (20 puncta)
+fprintf('Will create analysis sheets with two bin sizes: %d and %d puncta\n', binSizes(1), binSizes(2));
+
+% Loop through both bin sizes
+for binSizeIdx = 1:length(binSizes)
+    binSize = binSizes(binSizeIdx);
+    
+    fprintf('\n===== PROCESSING WITH %d-PUNCTA BINS =====\n', binSize);
+
+% Scan data to find actual maximum puncta count across all transcripts
+fprintf('Scanning data to determine required number of bins...\n');
+maxPuncta = 0;
+for rID = 1:size(bigDat, 1)
+    for treatID = 1:size(bigDat, 2)
+        for rankID = 1:size(bigDat, 3)
+            if ~isempty(bigDat{rID,treatID,rankID}) && size(bigDat{rID,treatID,rankID}, 2) >= 3
+                % Check max for each transcript
+                for trID = 1:3
+                    maxHere = max(bigDat{rID,treatID,rankID}(:, trID));
+                    if maxHere > maxPuncta
+                        maxPuncta = maxHere;
+                    end
+                end
+            end
+        end
+    end
+end
+
+% Calculate number of bins needed (add 2 extra bins for safety)
+maxBins = ceil(maxPuncta / binSize) + 2;
+fprintf('Maximum puncta count found: %d\n', maxPuncta);
+fprintf('Creating %d bins (up to %d puncta)\n', maxBins, maxBins*binSize);
+
+% Create bin labels with non-overlapping ranges: 0-10, 11-20, 21-30, etc.
+binLabels = cell(maxBins, 1);
+for i = 1:maxBins
+    if i == 1
+        binLabels{i} = sprintf('0-%d', binSize);
+    else
+        binLabels{i} = sprintf('%d-%d', (i-1)*binSize + 1, i*binSize);
+    end
+end
+
+% Define co-expression pairs to calculate
+% Format: {primary_transcript_idx, secondary_transcript_idx, threshold_for_primary}
+coexpPairs = {
+    {1, 3, 'CFOS', 'EP2'},   % CFOS+ given EP2 puncta
+    {1, 2, 'CFOS', 'OTR'},   % CFOS+ given OTR puncta
+    {3, 1, 'EP2', 'CFOS'},   % EP2+ given CFOS puncta
+    {3, 2, 'EP2', 'OTR'}     % EP2+ given OTR puncta
+};
+
+% Main export filename - includes bin size in name
+outputFilename = [binnedDir 'Binned_Expression_' num2str(binSize) 'pBins_' datestr(now, 'ddmmmyyyy') '.xlsx'];
+
+% Process each region
+for rIdx = 1:length(analysisParams.regionsToProcess)
+    rID = analysisParams.regionsToProcess(rIdx);
+    
+    fprintf('\nProcessing region: %s\n', regions{rID});
+    
+    % Initialize master tables for this region
+    masterTable = table();
+    masterCountsTable = table();
+    rowCounter = 1;
+    
+    % Collect all mice across all ranks and treatments
+    allMice = [];
+    for rankID = 1:4
+        for treatID = 1:2
+            if ~isempty(bigDat{rID,treatID,rankID}) && size(bigDat{rID,treatID,rankID}, 2) >= 6
+                [a,~,~] = unique(bigDat{rID,treatID,rankID}(:,4:5),'rows');
+                for m = 1:size(a,1)
+                    allMice = [allMice; a(m,:), rankID, treatID];
+                end
+            end
+        end
+    end
+    allMice = unique(allMice, 'rows');
+    
+    fprintf('  Found %d mice with data in this region\n', size(allMice,1));
+    
+    % Process each mouse
+    for mouseIdx = 1:size(allMice,1)
+        folderID = allMice(mouseIdx,1);
+        fileID = allMice(mouseIdx,2);
+        rankID = allMice(mouseIdx,3);
+        treatID = allMice(mouseIdx,4);
+        
+        % Get mouse ID
+        theFiles = dir([dataFolder hoStr{folderID} '*.csv']);
+        if fileID <= length(theFiles)
+            mouseID = theFiles(fileID).name(1:end-4);
+        else
+            mouseID = sprintf('Unknown_%d_%d', folderID, fileID);
+            continue;
+        end
+        
+        % Get this mouse's data
+        these = all(ismember(bigDat{rID,treatID,rankID}(:,4:5), allMice(mouseIdx,1:2)), 2);
+        mouseData = bigDat{rID,treatID,rankID}(these,:);
+        
+        if isempty(mouseData)
+            continue;
+        end
+        
+        % Get unique sections for this mouse
+        [sections,~,sectionIdx] = unique(mouseData(:,6));
+        
+        fprintf('    Processing %s (Rank %d, %s) - %d sections\n', ...
+                mouseID, rankID, treatments{treatID}, length(sections));
+        
+        % Initialize data arrays for bins
+        binData = nan(maxBins, 11); % Columns: bin center, 3 transcripts, 4 coexp, n_sections, rank, treatment
+        binCounts = nan(maxBins, 8); % Raw counts: 3 transcripts, 4 coexp, total cells
+        
+        % === SINGLE TRANSCRIPT PROPORTIONS ===
+        for trID = 1:3
+            if trID > size(mouseData, 2) - 3
+                continue;
+            end
+            
+            % Calculate proportion in each bin for each section
+            sectionProps = nan(length(sections), maxBins);
+            sectionCounts = nan(length(sections), maxBins);
+            
+            for secID = 1:length(sections)
+                sectionCells = mouseData(sectionIdx == secID, trID);
+                
+                % Bin the data (non-overlapping bins: 0-10, 11-20, 21-30, etc.)
+                for binID = 1:maxBins
+                    if binID == 1
+                        binMin = 0;
+                        binMax = binSize;
+                        cellsInBin = sectionCells >= binMin & sectionCells <= binMax;
+                    else
+                        binMin = (binID-1) * binSize + 1;
+                        binMax = binID * binSize;
+                        cellsInBin = sectionCells >= binMin & sectionCells <= binMax;
+                    end
+                    
+                    sectionCounts(secID, binID) = sum(cellsInBin);
+                    if sum(cellsInBin) > 0
+                        sectionProps(secID, binID) = sum(cellsInBin) / length(sectionCells);
+                    end
+                end
+            end
+            
+            % Average across sections and convert to PERCENTAGE
+            binData(:, trID+1) = mean(sectionProps, 1, 'omitnan')' * 100;
+            binCounts(:, trID) = sum(sectionCounts, 1, 'omitnan')';
+        end
+        
+        % === CO-EXPRESSION PROPORTIONS ===
+        for pairIdx = 1:length(coexpPairs)
+            pair = coexpPairs{pairIdx};
+            primaryIdx = pair{1};
+            secondaryIdx = pair{2};
+            primaryName = pair{3};
+            
+            % Get threshold for primary transcript
+            if isfield(analysisParams.thresholds, primaryName)
+                threshold = analysisParams.thresholds.(primaryName);
+            else
+                threshold = 5;
+            end
+            
+            % Check if we have the necessary columns
+            if max(primaryIdx, secondaryIdx) > size(mouseData, 2) - 3
+                continue;
+            end
+            
+            % Calculate co-expression for each section
+            sectionCoexp = nan(length(sections), maxBins);
+            sectionCoexpCounts = nan(length(sections), maxBins);
+            
+            for secID = 1:length(sections)
+                sectionCells = mouseData(sectionIdx == secID, :);
+                primaryCounts = sectionCells(:, primaryIdx);
+                secondaryCounts = sectionCells(:, secondaryIdx);
+                
+                % Bin by secondary transcript (non-overlapping bins)
+                for binID = 1:maxBins
+                    if binID == 1
+                        binMin = 0;
+                        binMax = binSize;
+                        cellsInBin = secondaryCounts >= binMin & secondaryCounts <= binMax;
+                    else
+                        binMin = (binID-1) * binSize + 1;
+                        binMax = binID * binSize;
+                        cellsInBin = secondaryCounts >= binMin & secondaryCounts <= binMax;
+                    end
+                    
+                    if sum(cellsInBin) > 0
+                        primaryInBin = primaryCounts(cellsInBin);
+                        numPositive = sum(primaryInBin > threshold);
+                        coexpProp = numPositive / length(primaryInBin);
+                        sectionCoexp(secID, binID) = coexpProp;
+                        sectionCoexpCounts(secID, binID) = numPositive;
+                    end
+                end
+            end
+            
+            % Average across sections and convert to PERCENTAGE
+            binData(:, 4 + pairIdx) = mean(sectionCoexp, 1, 'omitnan')' * 100;
+            binCounts(:, 3 + pairIdx) = sum(sectionCoexpCounts, 1, 'omitnan')';
+        end
+        
+        % Add metadata
+        binData(:, 9) = sum(~isnan(sectionProps), 1)'; % n_sections contributing to each bin
+        binData(:, 10) = rankID;
+        binData(:, 11) = treatID;
+        
+        % Create table for this mouse (simplified - only ID, bins, and expression data)
+        % All values are in PERCENTAGE (0-100)
+        mouseTable = table();
+        mouseTable.MouseID = repmat({mouseID}, maxBins, 1);
+        mouseTable.PunctaBin = binLabels;
+        mouseTable.CFOS_Percent = binData(:, 2);
+        mouseTable.OTR_Percent = binData(:, 3);
+        mouseTable.EP2_Percent = binData(:, 4);
+        mouseTable.CFOS_given_EP2_Percent = binData(:, 5);
+        mouseTable.CFOS_given_OTR_Percent = binData(:, 6);
+        mouseTable.EP2_given_CFOS_Percent = binData(:, 7);
+        mouseTable.EP2_given_OTR_Percent = binData(:, 8);
+        
+        % Create counts table for this mouse
+        mouseCountsTable = table();
+        mouseCountsTable.MouseID = repmat({mouseID}, maxBins, 1);
+        mouseCountsTable.PunctaBin = binLabels;
+        mouseCountsTable.CFOS_Count = binCounts(:, 1);
+        mouseCountsTable.OTR_Count = binCounts(:, 2);
+        mouseCountsTable.EP2_Count = binCounts(:, 3);
+        mouseCountsTable.CFOS_given_EP2_Count = binCounts(:, 4);
+        mouseCountsTable.CFOS_given_OTR_Count = binCounts(:, 5);
+        mouseCountsTable.EP2_given_CFOS_Count = binCounts(:, 6);
+        mouseCountsTable.EP2_given_OTR_Count = binCounts(:, 7);
+        
+        % Append to master tables
+        masterTable = [masterTable; mouseTable];
+        masterCountsTable = [masterCountsTable; mouseCountsTable];
+        
+        % Add blank row between mice for readability
+        if mouseIdx < size(allMice,1)
+            blankRow = table();
+            blankRow.MouseID = {''};
+            blankRow.PunctaBin = {''};
+            blankRow.CFOS_Percent = NaN;
+            blankRow.OTR_Percent = NaN;
+            blankRow.EP2_Percent = NaN;
+            blankRow.CFOS_given_EP2_Percent = NaN;
+            blankRow.CFOS_given_OTR_Percent = NaN;
+            blankRow.EP2_given_CFOS_Percent = NaN;
+            blankRow.EP2_given_OTR_Percent = NaN;
+            masterTable = [masterTable; blankRow];
+            
+            % Counts blank row
+            blankCountRow = table();
+            blankCountRow.MouseID = {''};
+            blankCountRow.PunctaBin = {''};
+            blankCountRow.CFOS_Count = NaN;
+            blankCountRow.OTR_Count = NaN;
+            blankCountRow.EP2_Count = NaN;
+            blankCountRow.CFOS_given_EP2_Count = NaN;
+            blankCountRow.CFOS_given_OTR_Count = NaN;
+            blankCountRow.EP2_given_CFOS_Count = NaN;
+            blankCountRow.EP2_given_OTR_Count = NaN;
+            masterCountsTable = [masterCountsTable; blankCountRow];
+        end
+    end  % End of mouseIdx loop (processing each mouse)
+    
+    % Write this region's data to Excel
+    if ~isempty(masterTable)
+        writetable(masterTable, outputFilename, 'Sheet', [regions{rID} '_Percent']);
+        fprintf('  Wrote %d rows to sheet: %s_Percent\n', height(masterTable), regions{rID});
+    else
+        fprintf('  No data to write for region: %s\n', regions{rID});
+    end
+    
+    % Write counts table
+    if ~isempty(masterCountsTable)
+        writetable(masterCountsTable, outputFilename, 'Sheet', [regions{rID} '_Counts']);
+        fprintf('  Wrote %d rows to sheet: %s_Counts\n', height(masterCountsTable), regions{rID});
+    end
+end  % End of rIdx loop (processing each region)
+
+fprintf('\n===== COMPLETED %d-PUNCTA BIN ANALYSIS =====\n', binSize);
+fprintf('Output saved to: %s\n', outputFilename);
+
+end  % End of binSizeIdx loop (processing each bin size)
+
+fprintf('\n===== ALL BINNED ANALYSES COMPLETE =====\n');
+fprintf('Generated files with %d and %d puncta bins\n', binSizes(1), binSizes(2));
+fprintf('Output directory: %s\n', binnedDir);
+fprintf('\nData organization:\n');
+fprintf('  - Two files: one with %d-puncta bins, one with %d-puncta bins\n', binSizes(1), binSizes(2));
+fprintf('  - Two sheets per region: _Percent and _Counts\n');
+fprintf('  - Each mouse = one block of rows\n');
+fprintf('  - PERCENT sheet: All values are percentages (0-100)\n');
+fprintf('  - COUNTS sheet: Raw cell counts\n');
+fprintf('  - Bins are non-overlapping (e.g., 0-10, 11-20, 21-30)\n');
+
+fprintf('\nALL ANALYSIS OUTPUTS COMPLETE!\n');
+
+
+
+
+
+
+
+fprintf('\n===== GENERATING SIMPLIFIED CO-EXPRESSION ANALYSIS =====\n');
+
+% Create output directory
+simplifiedDir = [outFolder 'Simplified_CoExpression/'];
+if ~isfolder(simplifiedDir); mkdir(simplifiedDir); end
+
+% Get thresholds from analysis parameters
+if isfield(analysisParams, 'thresholds')
+    thresh_CFOS = analysisParams.thresholds.CFOS;
+    thresh_OTR = analysisParams.thresholds.OTR;
+    thresh_EP2 = analysisParams.thresholds.EP2;
+else
+    % Fallback defaults
+    thresh_CFOS = 5;
+    thresh_OTR = 5;
+    thresh_EP2 = 5;
+end
+
+fprintf('Using thresholds: CFOS>%d, OTR>%d, EP2>%d\n', thresh_CFOS, thresh_OTR, thresh_EP2);
+
+% Create output filename
+outputFilename = [simplifiedDir 'Simplified_CoExpression_Analysis_thresh' ...
+                  num2str(thresh_CFOS) '_' datestr(now, 'ddmmmyyyy') '.xlsx'];
+
+% Initialize master data table
+allData = table();
+rowIdx = 1;
+
+% Process each region
+for rIdx = 1:length(analysisParams.regionsToProcess)
+    rID = analysisParams.regionsToProcess(rIdx);
+    
+    fprintf('\nProcessing region: %s\n', regions{rID});
+    
+    % Collect all mice across all ranks and treatments
+    allMice = [];
+    for rankID = 1:4
+        for treatID = 1:2
+            if ~isempty(bigDat{rID,treatID,rankID}) && size(bigDat{rID,treatID,rankID}, 2) >= 6
+                [a,~,~] = unique(bigDat{rID,treatID,rankID}(:,4:5),'rows');
+                for m = 1:size(a,1)
+                    allMice = [allMice; a(m,:), rankID, treatID];
+                end
+            end
+        end
+    end
+    allMice = unique(allMice, 'rows');
+    
+    fprintf('  Found %d mice with data in this region\n', size(allMice,1));
+    
+    % Process each mouse
+    for mouseIdx = 1:size(allMice,1)
+        folderID = allMice(mouseIdx,1);
+        fileID = allMice(mouseIdx,2);
+        rankID = allMice(mouseIdx,3);
+        treatID = allMice(mouseIdx,4);
+        
+        % Get mouse ID
+        theFiles = dir([dataFolder hoStr{folderID} '*.csv']);
+        if fileID <= length(theFiles)
+            mouseID = theFiles(fileID).name(1:end-4);
+        else
+            mouseID = sprintf('Unknown_%d_%d', folderID, fileID);
+            continue;
+        end
+        
+        % Get this mouse's data (pooled across all sections)
+        these = all(ismember(bigDat{rID,treatID,rankID}(:,4:5), allMice(mouseIdx,1:2)), 2);
+        mouseData = bigDat{rID,treatID,rankID}(these,:);
+        
+        if isempty(mouseData) || size(mouseData, 2) < 3
+            fprintf('    Skipping %s - insufficient data\n', mouseID);
+            continue;
+        end
+        
+        % Extract puncta counts for each transcript (pooled across all sections)
+        cfos_counts = mouseData(:, 1);
+        otr_counts = mouseData(:, 2);
+        ep2_counts = mouseData(:, 3);
+        
+        total_cells = length(cfos_counts);
+        
+        if total_cells == 0
+            fprintf('    Skipping %s - no cells\n', mouseID);
+            continue;
+        end
+        
+        fprintf('    Processing %s (Rank %d, %s) - %d total cells\n', ...
+                mouseID, rankID, treatments{treatID}, total_cells);
+        
+        % === PART 1: SINGLE TRANSCRIPT EXPRESSION ===
+        cfos_positive = cfos_counts > thresh_CFOS;
+        otr_positive = otr_counts > thresh_OTR;
+        ep2_positive = ep2_counts > thresh_EP2;
+        
+        num_cfos = sum(cfos_positive);
+        num_otr = sum(otr_positive);
+        num_ep2 = sum(ep2_positive);
+        
+        pct_cfos = (num_cfos / total_cells) * 100;
+        pct_otr = (num_otr / total_cells) * 100;
+        pct_ep2 = (num_ep2 / total_cells) * 100;
+        
+        % === PART 2: CONDITIONAL CO-EXPRESSION ===
+        % (Of X+ cells, what % also express Y?)
+        
+        % CFOS with OTR
+        cfos_and_otr = cfos_positive & otr_positive;
+        if num_cfos > 0
+            pct_cfos_with_otr = (sum(cfos_and_otr) / num_cfos) * 100;
+        else
+            pct_cfos_with_otr = NaN;
+        end
+        
+        % CFOS with EP2
+        cfos_and_ep2 = cfos_positive & ep2_positive;
+        if num_cfos > 0
+            pct_cfos_with_ep2 = (sum(cfos_and_ep2) / num_cfos) * 100;
+        else
+            pct_cfos_with_ep2 = NaN;
+        end
+        
+        % OTR with CFOS
+        if num_otr > 0
+            pct_otr_with_cfos = (sum(cfos_and_otr) / num_otr) * 100;
+        else
+            pct_otr_with_cfos = NaN;
+        end
+        
+        % OTR with EP2
+        otr_and_ep2 = otr_positive & ep2_positive;
+        if num_otr > 0
+            pct_otr_with_ep2 = (sum(otr_and_ep2) / num_otr) * 100;
+        else
+            pct_otr_with_ep2 = NaN;
+        end
+        
+        % EP2 with CFOS
+        if num_ep2 > 0
+            pct_ep2_with_cfos = (sum(cfos_and_ep2) / num_ep2) * 100;
+        else
+            pct_ep2_with_cfos = NaN;
+        end
+        
+        % EP2 with OTR
+        if num_ep2 > 0
+            pct_ep2_with_otr = (sum(otr_and_ep2) / num_ep2) * 100;
+        else
+            pct_ep2_with_otr = NaN;
+        end
+        
+        % === PART 3: CO-EXPRESSION AS % OF TOTAL ===
+        pct_cfos_otr_total = (sum(cfos_and_otr) / total_cells) * 100;
+        pct_cfos_ep2_total = (sum(cfos_and_ep2) / total_cells) * 100;
+        pct_otr_ep2_total = (sum(otr_and_ep2) / total_cells) * 100;
+        
+        % Triple co-expression
+        triple_positive = cfos_positive & otr_positive & ep2_positive;
+        pct_triple_total = (sum(triple_positive) / total_cells) * 100;
+        
+        % === STORE IN TABLE ===
+        allData.MouseID{rowIdx} = mouseID;
+        allData.Region{rowIdx} = regions{rID};
+        allData.Rank(rowIdx) = rankID;
+        allData.Treatment{rowIdx} = treatments{treatID};
+        allData.TotalCells(rowIdx) = total_cells;
+        
+        % Single expression
+        allData.CFOS_Percent(rowIdx) = pct_cfos;
+        allData.OTR_Percent(rowIdx) = pct_otr;
+        allData.EP2_Percent(rowIdx) = pct_ep2;
+        
+        % Conditional co-expression
+        allData.CFOS_with_OTR_Percent(rowIdx) = pct_cfos_with_otr;
+        allData.CFOS_with_EP2_Percent(rowIdx) = pct_cfos_with_ep2;
+        allData.OTR_with_CFOS_Percent(rowIdx) = pct_otr_with_cfos;
+        allData.OTR_with_EP2_Percent(rowIdx) = pct_otr_with_ep2;
+        allData.EP2_with_CFOS_Percent(rowIdx) = pct_ep2_with_cfos;
+        allData.EP2_with_OTR_Percent(rowIdx) = pct_ep2_with_otr;
+        
+        % Co-expression as % of total
+        allData.CFOS_OTR_of_Total(rowIdx) = pct_cfos_otr_total;
+        allData.CFOS_EP2_of_Total(rowIdx) = pct_cfos_ep2_total;
+        allData.OTR_EP2_of_Total(rowIdx) = pct_otr_ep2_total;
+        allData.Triple_of_Total(rowIdx) = pct_triple_total;
+        
+        rowIdx = rowIdx + 1;
+    end
+end
+
+% Write to Excel
+if ~isempty(allData)
+    writetable(allData, outputFilename, 'Sheet', 'All_Data');
+    fprintf('\n===== SIMPLIFIED CO-EXPRESSION COMPLETE =====\n');
+    fprintf('Wrote %d rows (mice × regions) to: %s\n', height(allData), outputFilename);
+    fprintf('\nColumn descriptions:\n');
+    fprintf('  Single Expression (%%): Cells with transcript >%d puncta\n', thresh_CFOS);
+    fprintf('  Conditional Co-expression (%%): Of X+ cells, %% also Y+\n');
+    fprintf('  Of Total (%%): Co-expressing cells as %% of all cells\n');
+    fprintf('  Triple_of_Total: Cells expressing all 3 transcripts\n');
+else
+    fprintf('\nNo data to write!\n');
+end
+
+fprintf('\nALL SIMPLIFIED ANALYSIS COMPLETE!\n');
