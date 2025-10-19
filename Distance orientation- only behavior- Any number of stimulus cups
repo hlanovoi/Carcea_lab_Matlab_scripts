@@ -1,0 +1,729 @@
+%% Check social distance photometry signal in central amygdala for Ioana
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% YOU MUST FILL THIS OUT FIRST
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+clear
+
+% directory of the data
+theFolder=['/Users/HL801/Desktop/Photometry_data/CeA_RF-4cup_PPOpilot_M/10.18.23/1L2R/'];
+% theFolder='/Volumes/T7/data/IoanaData/TSNE_TubeTestvsNot/Tube_tested/2 HR/Saline/TT_1L-dJ_Novel-L/';
+% name your mouse
+mouseName='CeA_RF-4cup_PPOpilot_M_1L2R';
+% Is this mouse a sensor mouse (YES) or GCamp (NO)?
+SigProcMode = 'NO';
+
+%%%%%%%%%%%%%%
+% when to begin the analysis, in seconds
+beginHere=46;
+%%%%%%%%%%%%%%
+
+% directory you want data saved
+outFolder=[theFolder '/Occupancy_9_23_25_/'];
+%  this distance limit is applied to the plots showing the occupancy & photometry distributed over angles
+withinThisDistance = 14;
+
+% pixels to cm conversion
+% pix2cm=4.25; 
+% pix2cm=6.916365799; % SPTT C1,C2,C3 and Female SPTT C1,C2,C2.5,C3
+pix2cm=4.432759171; %Cohort 3 and 6 PPO M in A620, Cohort SPTT_C6 and Cohort SPTT_C7 in A620C
+% pix2cm=7.387566106; %Non_TT Cohorts 4,5,6,7
+% pix2cm=6.390736444; %Non_TT Cohorts 8,9 and male SPTT d1,d2,d3,3,4,5
+
+
+% if we want to adjust the location of the cups, here are the current 'centers' in pixels
+% theCenters=[455 365;455 120;210 120;210 365];
+cupColor={'y' 'r' 'b' 'm'};
+% which grey shade do you want the background of the figures (0 is black, 1 is white)
+gg=.8;
+
+% please enter the full path to the behavior video here
+vidLocation = '/Users/HL801/Desktop/Photometry_data/CeA_RF-4cup_PPOpilot_M/10.18.23/1L2R/Pvideo0.mp4';
+
+% enter beginning and end time (in seconds) of period(s) you want removed
+rmStart=[];
+rmEnd=[]; 
+
+%for 6 min vid
+%361
+%999999
+
+%for 10 min vid
+%601
+%999999
+
+% 9 min is 540s
+
+nCups=4;
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+vidObj=VideoReader(vidLocation);
+FS = vidObj.FrameRate;
+vidFrame = read(vidObj,4800);
+%For most you can put 4400 to avoid the times the experimenter is in the frame
+% vidFrame = readFrame(vidObj);
+figure;
+imshow(vidFrame);
+[x,y] = ginput(nCups);
+theCenters=[x y];
+
+close all
+warning off
+
+theCenters=theCenters./pix2cm;
+if ~isfolder(outFolder)
+    mkdir(outFolder)
+end
+
+% Save the cup coordinates to a CSV file
+cupCoordinatesTable = array2table(theCenters, 'VariableNames', {'X_pixels', 'Y_pixels'});
+writetable(cupCoordinatesTable, [outFolder 'cup_coordinates.csv']);
+fprintf('Cup coordinates saved to %s\n', [outFolder 'cup_coordinates.csv']);
+
+
+cd(theFolder)
+scrSize=get(0,'ScreenSize');
+
+n=dir([theFolder '*.h5']);
+if length(n)==2
+    n=n(2).name;
+else
+    n=n.name;
+end
+cd(theFolder)
+tracks=h5read(n,'/tracks');
+
+% ****************************************************
+% add this****
+trackingTime=linspace(0,length(tracks)/FS,length(tracks));
+% ****************************************************
+
+
+%% interpolate nan values !
+% More robust interpolation
+% Define a maximum plausible velocity (in cm/frame)
+% Adjust this value based on your animal's typical movement speed
+max_velocity_threshold = 5; 
+
+% More robust interpolation with velocity filtering
+for bpID=1:size(tracks,2)
+    fprintf('\nProcessing body part %d\n', bpID);
+    for xy=1:2
+        tmp=tracks(:,bpID,xy);
+        theNan=isnan(tmp);
+        
+        % Only attempt interpolation if at least some data exists
+        if sum(~theNan) > 1  % Need at least 2 points for interpolation
+            % First pass: detect implausible jumps (tracking errors)
+            non_nan_indices = find(~theNan);
+            non_nan_values = tmp(non_nan_indices);
+            
+            % Calculate frame-to-frame velocity (in position units per frame)
+            if length(non_nan_indices) > 1
+                velocities = abs(diff(non_nan_values)) ./ diff(non_nan_indices);
+                
+                % Find indices where velocity exceeds threshold
+                jump_indices = find(velocities > max_velocity_threshold);
+                
+                if ~isempty(jump_indices)
+                    fprintf('  Found %d implausible jumps for dimension %d\n', length(jump_indices), xy);
+                    
+                    % Mark the points after jumps as NaN (they're likely errors)
+                    for j = 1:length(jump_indices)
+                        jump_idx = non_nan_indices(jump_indices(j) + 1);
+                        tmp(jump_idx) = NaN;
+                    end
+                    
+                    % Update the NaN mask
+                    theNan = isnan(tmp);
+                end
+            end
+            
+            % Now perform interpolation on cleaned data
+            try
+                newVec = tmp;
+                non_nan_indices = find(~theNan);
+                nan_indices = find(theNan);
+                
+                % Only interpolate NaNs that are between valid data points
+                interp_indices = nan_indices(nan_indices > min(non_nan_indices) & ...
+                                           nan_indices < max(non_nan_indices));
+                
+                if ~isempty(interp_indices)
+                    newVec(interp_indices) = interp1(non_nan_indices, ...
+                                                  tmp(non_nan_indices), ...
+                                                  interp_indices, 'linear');
+                end
+                
+                tracks(:,bpID,xy) = newVec;
+            catch
+                fprintf('  Could not interpolate for body part %d, dimension %d\n', bpID, xy);
+            end
+        else
+            fprintf('  Insufficient data for interpolation: body part %d, dimension %d\n', bpID, xy);
+        end
+    end
+end
+
+% remove bad periods
+removeThis = false(size(trackingTime));
+for i = 1:length(rmStart)
+    removeThis = removeThis | (trackingTime >= rmStart(i) & trackingTime <= rmEnd(i));
+end
+tracks(removeThis,:,:) = [];
+trackingTime(removeThis) = [];
+
+% Apply beginHere truncation
+beginHereTrack = find(trackingTime > beginHere, 1);
+if ~isempty(beginHereTrack)
+    tracks = tracks(beginHereTrack:end,:,:);
+    trackingTime = trackingTime(beginHereTrack:end);
+else
+    error('beginHere time not found in tracking data');
+end
+
+% Convert to cm AFTER all time filtering
+tracks = tracks./pix2cm;
+
+
+cupSymb={'s' 'd' 'o' '<'};
+cMap=flipud(bone);
+% distanceBounds=0:10:430;% bin the distance from cups like this
+% distanceBounds=distanceBounds./pix2cm;
+distanceBounds=0:2:40; %in cm
+
+trackingTimeAdjusted = trackingTime - trackingTime(1); % Start from 0
+totalTrackingTimeInSeconds = trackingTimeAdjusted(end);
+
+removedDurations = rmEnd - rmStart;
+% Only count removed time if it was in our tracking window
+effectiveRemovedTime = 0;
+for i = 1:length(rmStart)
+    if rmStart(i) < trackingTime(end)
+        effectiveRemovedTime = effectiveRemovedTime + min(rmEnd(i), trackingTime(end)) - rmStart(i);
+    end
+end
+correctedTotalTrackingTimeInSeconds = totalTrackingTimeInSeconds - effectiveRemovedTime;
+
+% let's get the total distance traveled, and the mean velocity (they are directly related)
+
+% First, check if interpolation was successful
+nan_counts = zeros(size(tracks,2), 1);
+for i=1:size(tracks,2)
+    nan_counts(i) = sum(isnan(tracks(:,i,1)) | isnan(tracks(:,i,2)));
+end
+
+fprintf('NaN counts after interpolation:\n');
+for i=1:size(tracks,2)
+    fprintf('Body part %d: %d NaNs (%.1f%%)\n', i, nan_counts(i), 100*nan_counts(i)/size(tracks,1));
+end
+
+%% Calculate distance and speed on properly filtered data
+dist_and_speed = nan(size(tracks,2),2);
+for i=1:size(tracks,2)
+    x = tracks(:,i,1);
+    y = tracks(:,i,2);
+    
+    % Skip frames with NaN values when calculating distance
+    valid_indices = ~isnan(x) & ~isnan(y);
+    x_valid = x(valid_indices);
+    y_valid = y(valid_indices);
+    
+    if length(x_valid) > 1
+        % Calculate distance only on valid segments
+        d = sum(sqrt(diff(x_valid).^2 + diff(y_valid).^2));
+        dist_and_speed(i,1) = d;
+        
+        % For speed, use the corrected total tracking time in seconds
+        dist_and_speed(i,2) = d/correctedTotalTrackingTimeInSeconds;
+    else
+        fprintf('Warning: Insufficient valid data for body part %d\n', i);
+        dist_and_speed(i,:) = [0, 0];
+    end
+end
+
+% Print final distance and speed results
+fprintf('\nFinal distance and speed results:\n');
+for i=1:size(tracks,2)
+    fprintf('Body part %d: Distance = %.2f cm, Speed = %.4f cm/s\n', ...
+            i, dist_and_speed(i,1), dist_and_speed(i,2));
+end
+
+dvMat=table;
+dvMat.Distance = dist_and_speed(:,1);
+dvMat.Speed= dist_and_speed(:,2);
+writetable(dvMat,[outFolder 'Dist_and_Speed_' mouseName '.csv']);
+
+
+%% Calculate angles and distances from cups (on filtered data)
+midPointEar = nan(length(tracks),2);
+midPointEar(:,1) = mean(tracks(:,2:3,1),2);
+midPointEar(:,2) = mean(tracks(:,2:3,2),2);
+
+theAngles = nan(size(tracks,1),nCups);
+distFromCup = nan(size(tracks,1),nCups);
+distFromCupInterp = nan(size(tracks,1),nCups);
+cumDistWithin = nan(size(tracks,1),nCups);
+
+figure('position',scrSize.*[1 1 1 .5],'color',gg*ones(3,1));
+for cupID=1:nCups
+    [tmpAngles, tmpDist] = getAngles_and_Distance_2pointsTracked_8aug2023(midPointEar,tracks(:,1,:),theCenters(cupID,:));
+    distFromCup(:,cupID) = tmpDist;
+    theAngles(:,cupID) = tmpAngles;
+    
+    subplot(2,4,1:4);hold on
+    plot(trackingTime,tmpDist,['-' cupColor{cupID}],'linewidth',3)
+    
+    % Interpolate NaN values
+    x = distFromCup(:,cupID);
+    a = x;
+    xx = 1:length(a);
+    a(isnan(a)) = interp1(xx(~isnan(a)),a(~isnan(a)),xx(isnan(a)));
+    distFromCupInterp(:,cupID) = a;
+    plot(trackingTime(isnan(x)),a(isnan(x)),'ok')
+    
+    subplot(247);hold on
+    tmpCumSum = cumsum(distFromCupInterp(:,cupID)<withinThisDistance);
+    cumDistWithin(:,cupID) = tmpCumSum;
+    plot(trackingTime,tmpCumSum,['-' cupColor{cupID}],'linewidth',3)
+    set(gca,'fontsize',20,'color',gg*ones(3,1))
+    ylabel({'cumulative time';'within user defined distance of cup'})
+    axis tight
+    box on
+end
+
+subplot(2,2,1:2);hold on
+axis tight
+xlabel('seconds')
+ylabel('cm from cup')
+set(gca,'fontsize',20,'color',gg*ones(3,1))
+
+sgtitle('\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4','fontsize',50)
+print(gcf,[outFolder 'DistFromCupOverTime' mouseName],'-dpng')
+
+%% Create distance over time table
+% Data is already filtered, so work directly with it
+targetFs = 25; % Hz
+originalTime = trackingTime - trackingTime(1); % Start from 0
+targetTime = (0:(1/targetFs):max(originalTime))';
+
+% Create the resampled table
+newT = table();
+newT.CorrectedTimeInSeconds = targetTime;
+newT.TimeInSeconds = targetTime + trackingTime(1); % Add back the original start time
+
+% Add distance columns
+for i = 1:nCups
+    newT.(['DistanceFromCup' num2str(i)]) = interp1(originalTime, distFromCupInterp(:,i), targetTime, 'linear', 'extrap');
+end
+
+% Add cumulative distance columns
+for i = 1:nCups
+    % No need to adjust since we start from the beginning
+    newT.(['CumDistWithin_Cup' num2str(i)]) = interp1(originalTime, cumDistWithin(:,i), targetTime, 'nearest', 'extrap');
+end
+
+writetable(newT, [outFolder 'DistanceOverTime_And_CumTimeUnderThreshold.csv']);
+
+
+%% let's 2d bining of social distance and angle...
+
+circBins=linspace(-pi-.01,pi+.01,40);
+nBins=length(distanceBounds)-1;
+figure('position',scrSize,'color','w','InvertHardcopy','off')
+tmpAllCups=[];
+theClims=[];
+occRange=[];
+bigCupHist=nan(length(circBins)-1,nBins,2,4); %angles,distances,occupancy/fp, cups
+
+for cupID=1:nCups
+    [a,b,c,~,e] = histcounts2(theAngles(:,cupID),distFromCup(:,cupID),circBins,distanceBounds);
+    [~,aBins,angInds]=histcounts(theAngles(:,cupID),circBins);
+    [~,distanceBounds,distInds] = histcounts(distFromCup(:,cupID),distanceBounds);
+
+    angCent=linspace(-pi,pi,size(a,1));
+    bothXY=nan(size(a,1),size(a,2),2);
+    for i=1:size(a,1)
+        for j = 1:size(a,2)
+            bothXY(i,j,1)=j*cos(angCent(i));
+            bothXY(i,j,2)=j*sin(angCent(i));
+        end
+    end
+    newA=a;
+    newA(newA==0)=nan;
+    bigCupHist(:,:,1,cupID)=newA;
+
+    % smooth here by elminating edges and replicating matrix on either side, then take middle slide
+    % tmp=repmat(newA,[3 1]);
+    % tmp=smooth2a(tmp,2,2);
+    % newA=tmp(size(newA,1)+1:2*size(newA,1),:);
+
+    subplot(2,nCups,cupID);hold on
+    pcolor(bothXY(:,:,1),bothXY(:,:,2),newA)
+    view(2)
+    grid off
+    axis off
+%     plot([-8 -10],[-nBins -nBins],'-w','linewidth',3)
+%     plot([-8 -10],[nBins nBins],'-w','linewidth',3)
+%     text(-10,nBins,'4 cm','color','w','VerticalAlignment','top','HorizontalAlignment','left','FontSize',15)
+%     plot([0 nBins],[nBins nBins],'-w','linewidth',3)
+%     text(nBins/2,nBins,'50 cm','color','w','VerticalAlignment','top','HorizontalAlignment','center','FontSize',15)
+    
+    axis(nBins*[-1 1 -1 1])
+    axis square
+    set(gca,'color','k','ydir','reverse')
+    title(sprintf('Cup %d',cupID),'color','w','fontsize',30)
+    ccc = colorbar;
+    ccc.Color='k';
+    colormap(jet)
+
+    ccc.Label.String = 'occupancy';
+    ccc.Label.FontSize=20;
+    barry=clim;
+    occRange=cat(1,occRange,barry);
+
+    % % now the FP signal
+    % subplot(2,nCups,nCups+cupID);hold on
+    % tmpFP=nan(size(a,1),size(a,2));
+    % for i=1:size(a,1)
+    %     for j =1 :size(a,2)
+    %         tmpFP(i,j)=mean(newSig(angInds==i & distInds==j),'omitnan');
+    %     end
+    % end
+    % tmpAllCups=cat(3,tmpAllCups,tmpFP);
+    % 
+    % % smooth here by elminating edges by replicating matrix on either side, then take middle slide
+    % tmp=repmat(tmpFP,[3 1]);
+    % % tmp=smooth2a(tmp,2,2);
+    % tmpFP=tmp(size(tmpFP,1)+1:2*size(tmpFP,1),:);
+    % bigCupHist(:,:,2,cupID)=tmpFP;
+    % 
+    % pcolor(bothXY(:,:,1),bothXY(:,:,2),tmpFP)
+    % view(2)
+    % grid off
+    % axis off
+    % plot([-8 -10],[-nBins -nBins],'-w','linewidth',3)
+    % plot([-8 -10],[nBins nBins],'-w','linewidth',3)
+    % text(-10,nBins,'4 cm','color','w','VerticalAlignment','top','HorizontalAlignment','left','FontSize',15)
+    % plot([0 nBins],[nBins nBins],'-w','linewidth',3)
+    % text(nBins/2,nBins,'50 cm','color','w','VerticalAlignment','top','HorizontalAlignment','center','FontSize',15)
+    % 
+    % axis(nBins*[-1 1 -1 1])
+    % axis square
+    % set(gca,'color','k','ydir','reverse')
+    % title(sprintf('Cup %d',cupID),'color','w','fontsize',30)
+    % ccc = colorbar;
+    % barry=clim;
+    % theClims=cat(1,theClims,barry);
+    % ccc.Color='k';
+    % colormap(jet)
+    % ccc.Label.String = 'CeA OTR activity';
+    % ccc.Label.FontSize=20;
+end
+for i =1:nCups
+    subplot(2,nCups,i);hold on
+    clim([min(occRange(:)) max(occRange(:))])
+    % subplot(2,nCups,nCups+i);hold on
+    % clim([min(theClims(:)) max(theClims(:))])
+end
+sgtitle(strrep(mouseName,'_',' '),'fontsize',50,'color','w')
+% print(gcf,[outFolder 'CupByCup_2dHist_' mouseName],'-dpng')
+
+% here you indicate what cups 1-4 are using "O" "N" "CM1" "CM2"
+bigCupIDs = {'O' 'N' 'CM1' 'CM2'}; % here, the first cup you clicked (cup1) is object, the second is Novel, etc
+% save([outFolder 'bigCupHist_' mouseName '.mat'],'bigCupHist','bigCupIDs','theAngles','distFromCup','newSig','tracks','trackingTime')
+save([outFolder 'bigCupHist_' mouseName '.mat'],'bigCupHist','bigCupIDs','theAngles','distFromCup','tracks','trackingTime')
+
+%%
+% figure('color','k','InvertHardcopy','off','position',[0 0 scrSize(3)/3 scrSize(3)/3]);hold on
+% pcolor(bothXY(:,:,1),bothXY(:,:,2),mean(tmpAllCups,3,'omitnan'))
+% view(2)
+% grid off
+% axis off
+% plot([8 10],[-nBins -nBins],'-w','linewidth',3)
+% plot([8 10],[nBins nBins],'-w','linewidth',3)
+% text(8,nBins,'4cm','color','w','VerticalAlignment','top','HorizontalAlignment','left','FontSize',15)
+% axis(nBins*[-1 1 -1 1])
+% axis square
+% set(gca,'color','k','ydir','reverse')
+% title('all cups','color','w','fontsize',30)
+% ccc = colorbar;
+% ccc.Color='w';
+% colormap(jet)
+% ccc.Label.String = 'CeA OTR activity'; 
+% ccc.Label.FontSize=20;
+% print(gcf,[outFolder 'AllCupsFP_2dHist'],'-dpng')
+
+% now we plot the actual X-Y positions as they exist in the arena, and also plot the cup dimensions..
+theX=tracks(:,1,1);
+theY=tracks(:,1,2);
+
+% figure('position',[0 0 scrSize(3)/3 scrSize(3)/6],'color',gg*ones(3,1),'InvertHardcopy','off');
+figure('position',[0 0 scrSize(3)/3 scrSize(3)/6],'color','w','InvertHardcopy','off');
+
+subplot(121);hold on
+plot(theX,theY,'.','color',.7*ones(3,1),'LineWidth',0.5)
+axis equal
+% axis(theAxis)
+axis off
+box on
+
+% for i=1:4
+% %     plot(theCenters(i,1),theCenters(i,2),'ok','markerfacecolor',cupColor{i},'markersize',15)
+%     circle(theCenters(i,:),4,1000,'-',[0 0 0],3)
+% end
+
+subplot(122);hold on
+[allTrack,~,~,aX,aY] = histcounts2(theY,theX,(60:10:425)/pix2cm,(160:10:520)/pix2cm);
+imagesc(linspace(160,520,size(allTrack,1))/pix2cm,linspace(60,425,size(allTrack,2))/pix2cm,allTrack/sum(allTrack(:)))
+axis equal
+axis off
+box on
+set(gca,'color',gg*ones(3,1))
+colormap(cMap)
+% for i=1:4
+%     plot(theCenters(i,1),theCenters(i,2),'ok','markerfacecolor',cupColor{i},'markersize',15)
+%     circle(theCenters(i,:),4,1000,'-',[0 0 0],3)
+% end
+sgtitle({'Nose';'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',25,'fontweight','bold')
+print(gcf,[outFolder 'trackingDataWcups_Center'],'-dpng')
+
+%% make plots for the distance that includes the interpolated values
+figure('position',scrSize.*([1 1 .5 1]),'color',gg*ones(3,1));
+% Use only data after beginHere
+d = distFromCupInterp;
+
+subplot(521);hold on
+x = distanceBounds(1:end-1)+mean(diff(distanceBounds))*.5;
+occupancyByDistance = table;
+occupancyByDistance.DistanceBin = x';
+for i = 1:nCups
+    a = histcounts(d(:,i),distanceBounds);
+    plot(x,a/30,['-' cupSymb{i} cupColor{i}],'linewidth',3)
+    occupancyByDistance.(['Cup' num2str(i) '_TotalTimeInSec']) = (a/30)';
+end
+writetable(occupancyByDistance,[outFolder 'Occupancy_by_DistanceInterpolated_' mouseName '.csv'])
+ylabel('seconds')
+xlabel('cm from cup')
+title({'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',15,'fontweight','bold')
+set(gca,'fontsize',20,'color',gg*ones(3,1))
+
+
+% subplot(522);hold on
+% bigDat=[];
+% for i=1:nCups % cups
+%     [a,c,b]=histcounts(d(:,i),distanceBounds);
+%     tmp=nan(length(a),2);
+%     for j=1:length(a)
+%         here=newSig(b==j);
+%         tmp(j,1)=mean(here,'omitnan');
+%         tmp(j,2)=std(here,'omitnan')./sqrt(length(here));
+%     end
+%     x=c(1:end-1)+.5*mean(diff(c));
+%     if i==1
+%         bigDat=cat(2,bigDat,x');
+%     end
+%     bigDat=cat(2,bigDat,tmp);
+%     errorbar(x+.25*(i-1),tmp(:,1),tmp(:,2),['-' cupColor{i}],'LineWidth',3)
+% end
+% signalDistance=table;
+% signalDistance.DistanceBin=x';
+% metStr={'Mean' 'SEM'};
+% for i=1:nCups
+%     for l=1:2
+%         signalDistance.(['Cup' num2str(i) '_' metStr{l}])=bigDat(:,2*(i-1)+l+1);
+%     end
+% end
+% writetable(signalDistance,[outFolder 'Signal_by_DistanceInterpolated_' mouseName '.csv'])
+% % axis tight
+% xlabel('cm from cup')
+% ylabel('\muCeA-OTR signal')
+% title({'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',15,'fontweight','bold')
+% set(gca,'fontsize',20,'color',gg*ones(3,1))
+
+% % make large plots whereby we plot the signal color coded by proximity to the cup
+% for i = 1:nCups
+%     subplot(5,2,[1 2]+2*i);hold on
+%     x=trackingTime;
+%     y=newSig;
+%     a=plot(x,y,'-k','linewidth',.5);
+%     a.Color=[a.Color .3];
+%     z=d(:,i);
+%     aaa=patch([x nan],[y nan],[z; nan],'edgecolor', 'flat','linewidth',2);
+%     colormap(flipud(jet));
+%     axis tight
+%     ylabel('CeA OTR signal')
+%     title(sprintf('Cup %d',i))
+%     c=colorbar;
+%     clim([0 max(max(d(:)))])
+%     c.Label.String='cm from cup';
+%     c.Label.FontSize=15;
+%     xlabel('seconds')
+%     set(gca,'fontsize',20,'color',gg*ones(3,1))
+% end
+% sgtitle([strrep(mouseName,'_',' ') ' Distance Interpolated'],'fontsize',40)
+% print(gcf,[outFolder 'cupDistance_CeAOTR_FP_InterpolatedDistance'],'-dpng')
+
+
+%% make plots for the distance that excludes interpolated values
+figure('position',scrSize.*([1 1 .5 1]),'color',gg*ones(3,1));
+faceStr={'FacingCup' 'FacingAway'};
+% Use only data after beginHere
+newAng = abs(theAngles);
+newAng = rad2deg(newAng);
+[~,~,newAng] = histcounts(newAng,[0 90 180]); % make binary categorization
+d = distFromCup;
+
+subplot(521);hold on
+lineDir={'-' ':'};
+x = distanceBounds(1:end-1)+mean(diff(distanceBounds))*.5;
+distanceByOrientation = table;
+distanceByOrientation.DistanceBin = x';
+for i = 1:nCups
+    for k = 1:2
+        justThese = newAng(:,i)==k;
+        a = histcounts(d(justThese,i),distanceBounds);
+        distanceByOrientation.(['Cup' num2str(i) '_' faceStr{k}]) = (a/30)';
+        plot(x,a/30,[lineDir{k} cupSymb{i} cupColor{i}],'linewidth',3)
+    end
+end
+ylabel('seconds')
+xlabel('cm from cup')
+title({'-Facing Cup';'--Facing Away From Cup';'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',15,'fontweight','bold')
+set(gca,'fontsize',20,'color',gg*ones(3,1))
+writetable(distanceByOrientation,[outFolder 'Occupancy_by_distanceByOrientation_' mouseName '.csv'])
+
+% % add in two conditions of facing toward or away
+% faceStr={'FacingCup' 'FacingAway'};
+% subplot(522);hold on
+% bigDat=[];
+% for i=1:nCups % cups
+%     [a,c,b]=histcounts(d(:,i),distanceBounds);
+%     for k=1:2
+%         tmp=nan(length(a),2);
+%         for j=1:length(a)
+%             here=newSig(b==j & newAng(:,i)==k);
+%             tmp(j,1)=mean(here);
+%             tmp(j,2)=std(here)./sqrt(length(here));
+%         end
+%         x=c(1:end-1)+.5*mean(diff(c));
+%         if i==1 && k==1
+%             bigDat=cat(2,bigDat,x');
+%         end
+%         bigDat=cat(2,bigDat,tmp);
+%         errorbar(x+.25*(i-1),tmp(:,1),tmp(:,2),[lineDir{k} cupColor{i}],'LineWidth',3)
+%     end
+% end
+% signalDistance=table;
+% signalDistance.DistanceBin=x';
+% metStr={'Mean' 'SEM'};
+% for i=1:4
+%     for k = 1:2
+%         for l=1:2
+%             signalDistance.(['Cup' num2str(i) '_' faceStr{k} metStr{l}])=bigDat(:,4*(i-1)+2*(k-1)+l+1);
+%         end
+%     end
+% end
+% writetable(signalDistance,[outFolder 'Signal_by_Distance_' mouseName '.csv'])
+% % axis tight
+% xlabel('cm from cup')
+% ylabel('\muCeA-OTR signal')
+% title({'-Facing Cup';'--Facing Away From Cup';'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',15,'fontweight','bold')
+% set(gca,'fontsize',20,'color',gg*ones(3,1))
+% 
+% % make large plots whereby we plot the signal color coded by proximity to the cup
+% for i = 1:nCups
+%     subplot(5,2,[1 2]+2*i);hold on
+%     x=trackingTime;
+%     y=newSig;
+%     a=plot(x,y,'-k','linewidth',.5);
+%     a.Color=[a.Color .3];
+%     z=d(:,i);
+%     aaa=patch([x nan],[y nan],[z; nan],'edgecolor', 'flat','linewidth',2);
+%     colormap(flipud(jet));
+%     axis tight
+%     ylabel('CeA OTR signal')
+%     title(sprintf('Cup %d',i))
+%     c=colorbar;
+%     clim([0 max(max(d(:)))])
+%     c.Label.String='cm from cup';
+%     c.Label.FontSize=15;
+%     xlabel('time (sec)')
+%     set(gca,'fontsize',20,'color',gg*ones(3,1))
+% end
+% sgtitle([strrep(mouseName,'_',' ') ' Distance'],'fontsize',40)
+% print(gcf,[outFolder 'cupDistance_CeAOTR_FP'],'-dpng')
+
+%% make plots for the angles
+figure('position',[0 0 scrSize(3)/3 scrSize(3)/6],'color',gg*ones(3,1));
+% Use only data after beginHere
+socDist = distFromCup;
+tmpAngs = abs(theAngles);
+tmpAngs = rad2deg(tmpAngs);
+
+subplot(121);hold on
+circBins = linspace(0,180,19);
+x = circBins(1:end-1)+mean(diff(circBins))*.5;
+occupancyByAngle = table;
+occupancyByAngle.AngleBin = x';
+for i = 1:nCups
+    onlyHere = socDist(:,i)<withinThisDistance;
+    a = histcounts(tmpAngs(onlyHere,i),circBins);
+    plot(x,a/30,['-' cupSymb{i} cupColor{i}],'linewidth',3)
+    occupancyByAngle.(['Cup' num2str(i) '_TotalTimeInSec']) = (a/30)';
+end
+writetable(occupancyByAngle,[outFolder 'Occupancy_by_Angle_' mouseName '.csv'])
+ylabel({'time spent at this angle';['(only within ' num2str(withinThisDistance) 'cm distance)']})
+xlabel('degrees')
+title('\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4','fontsize',15,'fontweight','bold')
+xlim([0 180])
+box on
+text([45 135],[0 0],{'Front' 'Behind'},'HorizontalAlignment','center','VerticalAlignment','bottom','fontsize',15)
+set(gca,'fontsize',15,'color',gg*ones(3,1))
+
+
+% % only look close to the cup (<20cm) and bin the occurance of certain angles..
+% subplot(122);hold on
+% bigDat=[];
+% for i=1:nCups % cups
+%     onlyClose=socDist(:,i)<withinThisDistance; % limit to the times when close to the cup
+%     [a,c,b]=histcounts(tmpAngs(:,i),circBins);
+%     tmp=nan(length(a),2);
+%     for j=1:length(a)
+%         here=newSig(b==j & onlyClose); % onlyClose
+%         tmp(j,1)=mean(here);
+%         tmp(j,2)=std(here)./sqrt(length(here));
+%     end
+%     x=c(1:end-1)+.5*mean(diff(c));
+%     bigDat=cat(2,bigDat,tmp);
+%     errorbar(x+.25*(i-1),tmp(:,1),tmp(:,2),['-' cupColor{i}],'LineWidth',3)
+% end
+% signalAngle=table;
+% signalAngle.AngleBin=x';
+% metStr={'Mean' 'SEM'};
+% for i=1:nCups
+%     for l=1:2
+%         signalAngle.(['Cup' num2str(i) '_' faceStr{k} metStr{l}])=bigDat(:,2*(i-1)+l);
+%     end
+% end
+% writetable(signalAngle,[outFolder 'Signal_by_Angle_' mouseName '.csv'])
+% 
+% axis tight
+% xlabel('degrees')
+% ylabel({'mean CeA-OTR signal';['(only within ~' num2str(withinThisDistance) 'cm distance)']})
+% title('\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4','fontsize',15,'fontweight','bold')
+% xlim([0 180])
+% % vline(90,':k')
+% box on
+% set(gca,'fontsize',15,'color',gg*ones(3,1))
+% 
+% yHere=ylim;
+% text([45 135],[yHere(1) yHere(1)],{'Front' 'Behind'},'HorizontalAlignment','center','VerticalAlignment','bottom','fontsize',15)
+% % 
+% sgtitle({['\fontsize{30}' strrep(mouseName,'_',' ') ' Angle'];['\fontsize{20}(only within ' num2str(withinThisDistance) 'cm)']})
+% print(gcf,[outFolder 'cupAngle_CeAOTR_FP_Angle'],'-dpng')
+close all
