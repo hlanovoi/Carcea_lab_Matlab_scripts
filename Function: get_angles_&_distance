@@ -1,0 +1,34 @@
+function [theAngles, theDist] = getAngles_and_Distance_2pointsTracked_8aug2023(center,nose,xy)
+    
+xyCenter = center;
+xyNose = nose;
+
+x_subject_part1 = xyCenter(:,1);  % X-coordinates of Subject Body Part 1 (time series)
+y_subject_part1 = xyCenter(:,2);  % Y-coordinates of Subject Body Part 1 (time series)
+x_subject_part2 = xyNose(:,1);  % X-coordinates of Subject Body Part 2 (time series)
+y_subject_part2 = xyNose(:,2);  % Y-coordinates of Subject Body Part 2 (time series)
+    
+% Object position (stable)
+x_object = xy(1);  % X-coordinate of the Object
+y_object = xy(2);  % Y-coordinate of the Object
+
+% theDist=sqrt((x_subject_part1-x_object).^2 + (y_subject_part1-y_object).^2);
+theDist=sqrt((x_subject_part2-x_object).^2 + (y_subject_part2-y_object).^2);
+
+% Calculate the vectors between the body parts of the subject
+delta_x_subject = x_subject_part2 - x_subject_part1;
+delta_y_subject = y_subject_part2 - y_subject_part1;
+
+% Calculate the vector between the subject's body parts and the object
+delta_x_object = x_object - x_subject_part1;
+delta_y_object = y_object - y_subject_part1;
+
+% Calculate the angle between the vectors
+angle_rad = atan2(delta_y_subject .* delta_x_object - delta_x_subject .* delta_y_object, delta_x_subject .* delta_x_object + delta_y_subject .* delta_y_object);
+angle_deg = rad2deg(angle_rad);
+
+% Normalize the angle to span from -pi to pi
+angle_norm = mod(angle_rad, 2*pi);
+angle_norm(angle_norm > pi) = angle_norm(angle_norm > pi) - 2*pi;
+
+theAngles=angle_norm;
