@@ -1,0 +1,916 @@
+%% Check social distance photometry signal in central amygdala for Ioana
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% YOU MUST FILL THIS OUT FIRST
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+clear all
+
+% IF only two cups click in the following order:
+% 1. Novel
+% 2. Cagemate
+
+% IF four cups AND you want the bigCupHist output click in the following order:
+% 1. Novel
+% 2. Object
+% 3. CM 1
+% 4. CM 2
+% If not the cups should be clicked in an inverted U pattern starting with the orange cup
+
+% directory of the data
+theFolder='/Users/HL801/Desktop/Photometry_data/PHOTOMETRY_SPTT_2cup/SPTT_Photo_C7/Td1/2L/';
+% name your mouse
+mouseName='SPTT_Photo_C7_2L';
+% Is this mouse a sensor mouse (YES) or GCamp (NO)?
+SigProcMode = 'NO';
+
+% when to begin the analysis, in seconds
+beginHere=93;
+% directory you want data saved
+outFolder=[theFolder '/output_DistOrient_Sig_9_23_25_GREEN_RIGHT/'];
+%  this distance limit is applied to the plots showing the occupancy & photometry distributed over angles
+withinThisDistance = 14;
+
+% pixels to cm conversion
+% pix2cm=4.672084168; %For Photo_SPTT_C1
+% pix2cm=4.767272943; %For Photo_SPTT_C2
+% pix2cm=4.661413722; %For Photo_SPTT_C3
+pix2cm=4.432759171;%For SPTT_Photo_C5, C6, C7
+
+
+% please enter the full path to the behavior video here
+vidLocation = '/Users/HL801/Desktop/Photometry_data/PHOTOMETRY_SPTT_2cup/SPTT_Photo_C7/Td1/2L/Pvideo0.mp4';
+
+% enter beginning and end time (in seconds) of period(s) you want removed
+rmStart=[195,555,587,608];
+rmEnd=[215,569,603,611];
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%Number of cups
+nCups=2;
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Do you want to bin the data? (yes) or (no)?
+binData = input('Do you want to bin the data? (yes/no): ', 's');
+binData = lower(binData); % Convert input to lowercase for consistency
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+% Cup color and grey shade for the figures (0 is black, 1 is white)
+cupColor={'y' 'r' 'b' 'm'};
+gg=.8;
+
+if nCups == 2
+    cupLabels = {'Novel', 'Cagemate'};
+    cupLabelTitle = '\color{yellow}Novel \color{red}Cagemate';
+else
+    cupLabels = cell(1, nCups);
+    for i = 1:nCups
+        cupLabels{i} = ['Cup' num2str(i)];
+    end
+    
+    % Build color-coded title string
+    cupLabelTitle = '';
+    for i = 1:nCups
+        cupLabelTitle = [cupLabelTitle '\color{' cupColor{i} '}Cup' num2str(i) ' '];
+    end
+end
+
+if strcmp(binData, 'yes')
+    % Define binning
+    binStart = input('Enter start times for each bin (e.g., [0, 100, 200]): ');
+    binEnd = input('Enter end times for each bin (e.g., [100, 200, 300]): ');
+    numBins = length(binStart);
+
+    % Ensure that the bins are defined correctly
+    if length(binStart) ~= length(binEnd)
+        error('Bin start and end times must have the same length');
+    end
+
+    % Display bin information
+    disp('Binning Information:');
+    for i = 1:numBins
+        fprintf('Bin %d: Start = %d sec, End = %d sec\n', i, binStart(i), binEnd(i));
+    end
+end
+
+
+vidObj=VideoReader(vidLocation);
+FS = vidObj.FrameRate;
+vidFrame = read(vidObj,4500);
+figure;
+imshow(vidFrame);
+[x,y] = ginput(nCups);
+theCenters=[x y];
+close all
+
+warning off
+theCenters=theCenters./pix2cm;
+if ~isfolder(outFolder);mkdir(outFolder);end
+
+cd(theFolder)
+scrSize=get(0,'ScreenSize');
+
+n=dir([theFolder '*.h5']);
+if length(n)==2
+    n=n(2).name;
+else
+    n=n.name;
+end
+cd(theFolder)
+tracks=h5read(n,'/tracks');
+
+%% interpolate nan values !
+for bpID=1:size(tracks,2)
+    fprintf('\n%d',bpID)
+    for xy=1:2
+        tmp=tracks(:,bpID,xy);
+        theNan=isnan(tmp);
+        if xy==1
+            fprintf(' %d/%d',sum(theNan),length(theNan))
+        end
+        newVec=tmp;
+        newVec(theNan)=interp1(find(~theNan),tmp(~theNan),find(theNan),'linear');
+        tracks(:,bpID,xy) = newVec;
+    end
+end
+%%
+
+cupSymb={'s' 'd' 'o' '<'};
+cMap=flipud(bone);
+distanceBounds=0:2:40; %in cm
+
+% get the fiber photometry data
+fpFile=dir([theFolder 'P*.csv']);
+fpFile=fpFile.name;
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%
+% fp=readtable(fpFile);
+% theSig=fp.Region0G(fp.LedState==2); % define ROI
+% ref=fp.Region0G(fp.LedState==1); % define ROI
+% theTime=fp.Timestamp(fp.LedState==2);
+% theMin=min([length(theSig) length(ref)]);
+% theSig=theSig(1:theMin);ref=ref(1:theMin);theTime=theTime(1:theMin);    
+% theTime=theTime-theTime(1);
+%%%%%%%%%%%%
+
+% % For new Photometry data collected (After 8/15/25)
+fp=readtable(fpFile);
+theSig=fp.G0(fp.LedState==2); % define ROI
+ref=fp.G0(fp.LedState==1); % define ROI
+theTime=fp.ComputerTimestamp(fp.LedState==2);
+theMin=min([length(theSig) length(ref)]);
+theSig=theSig(1:theMin);ref=ref(1:theMin);theTime=theTime(1:theMin);    
+theTime=theTime-theTime(1);
+
+
+%LED states
+
+% 6 is green if using trig 1
+% 2 is green if using trig 3
+% 4 is red if using trig 3
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+%% Process the signal
+if strcmp(SigProcMode, 'NO') % If GCamp correct to the isosbestic
+    % use neurophotometrics formulas to adjust Ca signal to the isosbestic...
+    temp_x = (1:length(ref)); %create a temporary x variable
+    fit_exp = fit(temp_x',double(ref),'exp2'); %fit with biexponential
+    fitRef2 = robustfit(fit_exp(temp_x),theSig); %scale exp2 fit using robust fit
+    fitSig = fit_exp(temp_x)*fitRef2(2)+fitRef2(1); %save the output
+    newSig = theSig./fitSig;
+else % If sensor mouse, skip isosbestic correction
+    newSig = theSig; % Use the signal as is without isosbestic correction
+end
+
+trackingTime = linspace(0, theTime(end), length(tracks));
+newSig = interp1(linspace(trackingTime(1), max(trackingTime), length(theTime)), newSig, trackingTime);
+
+% Add debugging
+fprintf('Initial trackingTime range: %.2f to %.2f seconds\n', trackingTime(1), trackingTime(end));
+fprintf('beginHere = %.2f seconds\n', beginHere);
+
+% Check if beginHere is within range
+if beginHere > trackingTime(end)
+    error('beginHere (%.2f) is beyond the end of trackingTime (%.2f)', beginHere, trackingTime(end));
+end
+
+
+%%%%%%%%%%%%%%%%
+% ALIGN THE DATA
+%%%%%%%%%%%%%%%%
+
+% Define trackingTime first
+trackingTime = linspace(0, theTime(end), length(tracks));
+fprintf('Initial trackingTime range: %.2f to %.2f seconds\n', trackingTime(1), trackingTime(end));
+fprintf('beginHere = %.2f seconds\n', beginHere);
+
+% Check if beginHere is reasonable
+if beginHere >= trackingTime(end)
+    fprintf('WARNING: beginHere (%.2f) is beyond or equal to the end of tracking data (%.2f).\n', beginHere, trackingTime(end));
+    fprintf('Setting beginHere to 0 instead.\n');
+    beginHere = 0;
+end
+
+% Find the first frame after beginHere
+beginHereTrack = find(trackingTime > beginHere, 1);
+if isempty(beginHereTrack)
+    fprintf('WARNING: No frames found after beginHere. Using first frame.\n');
+    beginHereTrack = 1;
+else
+    fprintf('Found first frame after beginHere at index %d (%.2f seconds)\n', beginHereTrack, trackingTime(beginHereTrack));
+end
+
+% Remove bad periods (if any)
+if ~isempty(rmStart)
+    removeThis = false(size(trackingTime));
+    for i = 1:length(rmStart)
+        removeThis = removeThis | (trackingTime >= rmStart(i) & trackingTime <= rmEnd(i));
+    end
+    
+    % Count frames to be removed
+    framesToRemove = sum(removeThis);
+    fprintf('Removing %d frames due to bad periods (%d%% of total)\n', framesToRemove, round(100*framesToRemove/length(removeThis)));
+    
+    % Only remove if it won't remove everything
+    if framesToRemove < length(removeThis)
+        newSig(removeThis) = [];
+        tracks(removeThis,:,:) = [];
+        trackingTime(removeThis) = [];
+        fprintf('After removing bad periods: %d frames remain\n', length(trackingTime));
+    else
+        fprintf('WARNING: Skipping removal of bad periods as it would remove all data\n');
+    end
+end
+
+% Truncate data starting from beginHereTrack, but check if valid first
+if beginHereTrack <= length(trackingTime)
+    fprintf('Truncating data to start from frame %d (%.2f seconds)\n', beginHereTrack, trackingTime(beginHereTrack));
+    newSig = newSig(beginHereTrack:end);
+    tracks = tracks(beginHereTrack:end,:,:);
+    trackingTime = trackingTime(beginHereTrack:end);
+    fprintf('After truncation: %d frames remain\n', length(trackingTime));
+else
+    fprintf('WARNING: beginHereTrack (%d) is beyond available data (%d frames). Not truncating.\n',beginHereTrack, length(trackingTime));
+end
+
+% Verify we still have data
+if isempty(trackingTime) || size(tracks, 1) == 0
+    error(['CRITICAL ERROR: No tracking data remains after processing. ', ...
+           'Check beginHere (%.2f) and rmStart/rmEnd values. ', ...
+           'Original data had %d frames.'], beginHere, size(tracks, 1));
+end
+
+% Calculate adjusted timing info
+trackingTimeAdjusted = trackingTime - beginHere;
+fprintf('trackingTimeAdjusted range: %.2f to %.2f seconds\n', trackingTimeAdjusted(1), trackingTimeAdjusted(end));
+totalTrackingTimeInSeconds = trackingTimeAdjusted(end);
+
+if ~isempty(rmStart)
+    removedDurations = rmEnd - rmStart;
+    totalRemovedTime = sum(removedDurations);
+    correctedTotalTrackingTimeInSeconds = totalTrackingTimeInSeconds - totalRemovedTime;
+end
+
+removedDurations = rmEnd - rmStart;
+totalRemovedTime = sum(removedDurations);
+correctedTotalTrackingTimeInSeconds = totalTrackingTimeInSeconds - totalRemovedTime;
+
+% Convert to cm AFTER truncation
+tracks = tracks./pix2cm;
+fprintf('Converted tracks to cm. Final tracks size: %dx%dx%d\n', size(tracks,1), size(tracks,2), size(tracks,3));
+
+% Calculate total distance and speed
+dist_and_speed = nan(size(tracks,2),2);
+for i=1:size(tracks,2)
+    x = tracks(:,i,1);
+    y = tracks(:,i,2);
+    
+    d = sum(sqrt(diff(x).^2 + diff(y).^2));
+    dist_and_speed(i,1)=d;
+    dist_and_speed(i,2)=d/length(x)/FS;
+end
+dvMat=table;
+dvMat.Distance = dist_and_speed(:,1);
+dvMat.Speed= dist_and_speed(:,2);
+writetable(dvMat,[outFolder 'Dist_and_Speed_' mouseName '.csv']);
+
+% Calculate midpoint ear AFTER truncation
+midPointEar = nan(length(tracks),2);
+midPointEar(:,1)=mean(tracks(:,2:3,1),2);
+midPointEar(:,2)=mean(tracks(:,2:3,2),2);
+fprintf('Calculated midPointEar. Size: %dx%d\n', size(midPointEar,1), size(midPointEar,2));
+
+newSig=zscore(newSig); % zscore the photometry signal
+fprintf('Z-scored photometry signal. Length: %d\n', length(newSig));
+
+
+%% let's find the angle & distance between the mouse and the cups
+
+theAngles=nan(size(tracks,1),nCups);
+distFromCup=nan(size(tracks,1),nCups);
+distFromCupInterp=nan(size(tracks,1),nCups);
+cumDist30 = nan(size(tracks,1),nCups); % For storing cumulative time under 30cm
+
+figure('position',scrSize.*[1 1 1 .5],'color',gg*ones(3,1));
+for cupID=1:nCups
+    % First check the sizes of our inputs
+    fprintf('Cup %d: Data dimensions - midPointEar: %dx%d, tracks: %dx%dx%d\n', ...
+        cupID, size(midPointEar,1), size(midPointEar,2), ...
+        size(tracks,1), size(tracks,2), size(tracks,3));
+        
+    % Get the distance and angles
+    [tmpAngles, tmpDist] = getAngles_and_Distance_2pointsTracked_19Mar2025(midPointEar, tracks(:,1,:), theCenters(cupID,:));
+    
+    % Debug info
+    fprintf('Cup %d: trackingTime length = %d, tmpDist length = %d\n', ...
+        cupID, length(trackingTime), length(tmpDist));
+    
+    % Make sure arrays match in size
+    if length(tmpDist) ~= length(trackingTime)
+        fprintf('WARNING: Size mismatch for Cup %d (tmpDist: %d, trackingTime: %d)\n', ...
+            cupID, length(tmpDist), length(trackingTime));
+            
+        if length(tmpDist) > length(trackingTime)
+            % If tmpDist is longer, truncate it
+            tmpDist = tmpDist(1:length(trackingTime));
+            tmpAngles = tmpAngles(1:length(trackingTime));
+            fprintf('  - Truncated tmpDist/tmpAngles to length %d\n', length(trackingTime));
+        else
+            % If tmpDist is shorter, use NaN padding
+            newDist = nan(size(trackingTime));
+            newAngles = nan(size(trackingTime));
+            newDist(1:length(tmpDist)) = tmpDist;
+            newAngles(1:length(tmpAngles)) = tmpAngles;
+            tmpDist = newDist;
+            tmpAngles = newAngles;
+            fprintf('  - Padded tmpDist/tmpAngles with NaNs to length %d\n', length(trackingTime));
+        end
+    end
+    
+    % Store the processed values
+    distFromCup(:,cupID) = tmpDist;
+    theAngles(:,cupID) = tmpAngles;
+    
+    % Plot with safety check
+    subplot(2,4,1:4); hold on;
+    validIdx = ~isnan(tmpDist);
+    plot(trackingTime(validIdx), tmpDist(validIdx), ['-' cupColor{cupID}], 'linewidth', 3);
+    
+    % Rest of processing
+    x = distFromCup(:,cupID);
+    a = x;
+    % Interpolate 
+    xx = 1:length(a);
+    a(isnan(a)) = interp1(xx(~isnan(a)), a(~isnan(a)), xx(isnan(a)), 'linear', 'extrap');
+    distFromCupInterp(:,cupID) = a;
+    plot(trackingTime(isnan(x)), a(isnan(x)), 'ok');
+
+    % Calculate cumulative time within 30cm
+    subplot(247); hold on;
+    tmpCumSum = cumsum(distFromCupInterp(:,cupID)<withinThisDistance);
+    cumDistWithin(:,cupID) = tmpCumSum;
+    plot(trackingTime, tmpCumSum, ['-' cupColor{cupID}], 'linewidth', 3);
+    set(gca, 'fontsize', 20, 'color', gg*ones(3,1));
+    ylabel({'cumulative time'; 'within 30cm of cup'});
+    axis tight;
+    box on;
+end
+
+subplot(2,2,1:2); hold on;
+axis tight;
+xlabel('seconds');
+ylabel('cm from cup');
+set(gca, 'fontsize', 20, 'color', gg*ones(3,1));
+
+sgtitle(cupLabelTitle, 'fontsize', 50);
+print(gcf, [outFolder 'DistFromCupOverTime' mouseName], '-dpng');
+
+
+
+
+% Create table with Preference x distance data
+
+% Define target sampling rate for consistency
+targetFs = 25; % Hz (0.04 seconds per sample)
+
+% Calculate target time vector (starting from the beginning of our truncated data)
+originalTime = trackingTime' - trackingTime(1); % Time adjusted to start at 0
+targetTime = (0:(1/targetFs):max(originalTime))';
+
+% Create the resampled table with consistent column order
+resampledT = table();
+resampledT.CorrectedTimeInSeconds = targetTime;
+resampledT.TimeInSeconds = targetTime + trackingTime(1); % Original time reference 
+
+% First add all distance columns
+for i = 1:nCups
+    % Resample to 25Hz
+    resampledT.(['DistanceFromCup' num2str(i)]) = interp1(originalTime, distFromCupInterp(:,i), targetTime, 'linear', 'extrap');
+end
+
+% Then add all cumulative distance columns
+for i = 1:nCups
+    % Extract cumulative data
+    if exist('cumDistWithin', 'var')
+        originalCumData = cumDistWithin(:,i);
+        
+        % Convert frames to seconds by dividing by the original frame rate (FS)
+        originalCumDataInSeconds = originalCumData / FS;
+    else
+        warning('No cumulative distance variable found (cumDistWithin). Using zeros.');
+        originalCumDataInSeconds = zeros(size(originalTime));
+    end
+    
+    % Resample cumulative time data (now in seconds)
+    resampledT.(['CumTimeWithin_Cup' num2str(i) '_Sec']) = interp1(originalTime, originalCumDataInSeconds, targetTime, 'nearest', 'extrap');
+end
+
+% Add the z-scored signal data
+if exist('newSig', 'var') && length(newSig) == length(originalTime)
+    % Resample the signal to match our 25Hz timebase
+    resampledT.ZscoredSignal = interp1(originalTime, newSig, targetTime, 'linear', 'extrap');
+    
+    % Add cumulative preference index if we have at least 2 cups
+    if nCups >= 2
+        % Calculate instantaneous preference at each time point
+        dist1 = resampledT.DistanceFromCup1;
+        dist2 = resampledT.DistanceFromCup2;
+        
+        % Avoid division by zero
+        denominator = dist1 + dist2;
+        denominator(denominator == 0) = 1e-10;
+        
+        % Calculate instantaneous preference
+        instantPreference = (dist1 - dist2) ./ denominator;
+        
+        % Build cumulative preference index as running average
+        cumulativePreference = cumsum(instantPreference);
+        numSamples = 1:length(cumulativePreference);
+        resampledT.CumulativePreferenceIndex = cumulativePreference ./ numSamples';
+    end
+end
+
+% Save the comprehensive table with behavior and signal data
+if exist('newSig', 'var') && length(newSig) == length(originalTime)
+    writetable(resampledT, [outFolder 'SignalAndBehavior_' mouseName '.csv']);
+else
+    % If we don't have signal data, just save the behavioral data
+    writetable(resampledT, [outFolder 'DistanceOverTime_And_CumTimeUnderThreshold.csv']);
+end
+
+
+
+%% let's 2d bining of social distance and angle...
+
+circBins=linspace(-pi-.01,pi+.01,40);
+nBins=length(distanceBounds)-1;
+figure('position',scrSize.*([1 1 0.25*nCups 1]),'color','w','InvertHardcopy','off')
+tmpAllCups=[];
+theClims=[];
+occRange=[];
+bigCupHist=nan(length(circBins)-1,nBins,2,nCups); %angles,distances,occupancy/fp, cups
+for cupID=1:nCups
+    [a,b,c,~,e] = histcounts2(theAngles(:,cupID),distFromCup(:,cupID),circBins,distanceBounds);
+    [~,aBins,angInds]=histcounts(theAngles(:,cupID),circBins);
+    [~,distanceBounds,distInds] = histcounts(distFromCup(:,cupID),distanceBounds);
+
+    angCent=linspace(-pi,pi,size(a,1));
+    bothXY=nan(size(a,1),size(a,2),2);
+    for i=1:size(a,1)
+        for j = 1:size(a,2)
+            bothXY(i,j,1)=j*cos(angCent(i));
+            bothXY(i,j,2)=j*sin(angCent(i));
+        end
+    end
+    newA=a;
+    newA(newA==0)=nan;
+    bigCupHist(:,:,1,cupID)=newA;
+
+    % smooth here by elminating edges and replicating matrix on either side, then take middle slide
+    % tmp=repmat(newA,[3 1]);
+    % tmp=smooth2a(tmp,2,2);
+    % newA=tmp(size(newA,1)+1:2*size(newA,1),:);
+
+    subplot(2,nCups,cupID);hold on
+    pcolor(bothXY(:,:,1),bothXY(:,:,2),newA)
+    view(2)
+    grid off
+    axis off
+%     plot([-8 -10],[-nBins -nBins],'-w','linewidth',3)
+%     plot([-8 -10],[nBins nBins],'-w','linewidth',3)
+%     text(-10,nBins,'4 cm','color','w','VerticalAlignment','top','HorizontalAlignment','left','FontSize',15)
+%     plot([0 nBins],[nBins nBins],'-w','linewidth',3)
+%     text(nBins/2,nBins,'50 cm','color','w','VerticalAlignment','top','HorizontalAlignment','center','FontSize',15)
+    
+    axis(nBins*[-1 1 -1 1])
+    axis square
+    set(gca,'color','k','ydir','reverse')
+    title(sprintf('Cup %d',cupID),'color','w','fontsize',30)
+    ccc = colorbar;
+    ccc.Color='k';
+    colormap(jet)
+
+    ccc.Label.String = 'occupancy';
+    ccc.Label.FontSize=20;
+    barry=clim;
+    occRange=cat(1,occRange,barry);
+
+    % now the FP signal
+    subplot(2,nCups,nCups+cupID);hold on
+    tmpFP=nan(size(a,1),size(a,2));
+    for i=1:size(a,1)
+        for j =1 :size(a,2)
+            tmpFP(i,j)=mean(newSig(angInds==i & distInds==j),'omitnan');
+        end
+    end
+    tmpAllCups=cat(3,tmpAllCups,tmpFP);
+
+    % smooth here by elminating edges by replicating matrix on either side, then take middle slide
+    tmp=repmat(tmpFP,[3 1]);
+    % tmp=smooth2a(tmp,2,2);
+    tmpFP=tmp(size(tmpFP,1)+1:2*size(tmpFP,1),:);
+    bigCupHist(:,:,2,cupID)=tmpFP;
+
+    pcolor(bothXY(:,:,1),bothXY(:,:,2),tmpFP)
+    view(2)
+    grid off
+    axis off
+    plot([-8 -10],[-nBins -nBins],'-w','linewidth',3)
+    plot([-8 -10],[nBins nBins],'-w','linewidth',3)
+    text(-10,nBins,'4 cm','color','w','VerticalAlignment','top','HorizontalAlignment','left','FontSize',15)
+    plot([0 nBins],[nBins nBins],'-w','linewidth',3)
+    text(nBins/2,nBins,'50 cm','color','w','VerticalAlignment','top','HorizontalAlignment','center','FontSize',15)
+    
+    axis(nBins*[-1 1 -1 1])
+    axis square
+    set(gca,'color','k','ydir','reverse')
+    title(sprintf('Cup %d',cupID),'color','w','fontsize',30)
+    ccc = colorbar;
+    barry=clim;
+    theClims=cat(1,theClims,barry);
+    ccc.Color='k';
+    colormap(jet)
+    ccc.Label.String = 'CeA OTR activity';
+    ccc.Label.FontSize=20;
+end
+for i =1:nCups
+    subplot(2,nCups,i);hold on
+    clim([min(occRange(:)) max(occRange(:))])
+    subplot(2,nCups,nCups+i);hold on
+    clim([min(theClims(:)) max(theClims(:))])
+end
+sgtitle(strrep(mouseName,'_',' '),'fontsize',50,'color','w')
+print(gcf,[outFolder 'CupByCup_2dHist_' mouseName],'-dpng')
+
+
+% here you indicate what cups 1-4 are using "O" "N" "CM1" "CM2"
+if nCups == 2
+    bigCupIDs = {'N', 'CM'}; % Novel and Cagemate
+else
+    bigCupIDs = {'N', 'O', 'CM1', 'CM2'}; % According to your desired order
+end
+save([outFolder 'bigCupHist_' mouseName '.mat'],'bigCupHist','bigCupIDs','theAngles','distFromCup')
+
+
+%%
+figure('color','k','InvertHardcopy','off','position',[0 0 scrSize(3)/3 scrSize(3)/3]);hold on
+pcolor(bothXY(:,:,1),bothXY(:,:,2),mean(tmpAllCups,3,'omitnan'))
+view(2)
+grid off
+axis off
+plot([8 10],[-nBins -nBins],'-w','linewidth',3)
+plot([8 10],[nBins nBins],'-w','linewidth',3)
+text(8,nBins,'4cm','color','w','VerticalAlignment','top','HorizontalAlignment','left','FontSize',15)
+axis(nBins*[-1 1 -1 1])
+axis square
+set(gca,'color','k','ydir','reverse')
+title('all cups','color','w','fontsize',30)
+ccc = colorbar;
+ccc.Color='w';
+colormap(jet)
+ccc.Label.String = 'CeA OTR activity'; 
+ccc.Label.FontSize=20;
+print(gcf,[outFolder 'AllCupsFP_2dHist'],'-dpng')
+
+%% now we plot the actual X-Y positions as they exist in the arena, and also plot the cup dimensions..
+theX=tracks(:,1,1);
+theY=tracks(:,1,2);
+
+% figure('position',[0 0 scrSize(3)/3 scrSize(3)/6],'color',gg*ones(3,1),'InvertHardcopy','off');
+figure('position',[0 0 scrSize(3)/3 scrSize(3)/6],'color','w','InvertHardcopy','off');
+
+subplot(121);hold on
+plot(theX,theY,'.','color',.7*ones(3,1),'LineWidth',0.5)
+axis equal
+% axis(theAxis)
+axis off
+box on
+
+subplot(122);hold on
+[allTrack,~,~,aX,aY] = histcounts2(theY,theX,(60:10:425)/pix2cm,(160:10:520)/pix2cm);
+imagesc(linspace(160,520,size(allTrack,1))/pix2cm,linspace(60,425,size(allTrack,2))/pix2cm,allTrack/sum(allTrack(:)))
+axis equal
+axis off
+box on
+set(gca,'color',gg*ones(3,1))
+colormap(cMap)
+
+sgtitle({'Nose';'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',25,'fontweight','bold')
+print(gcf,[outFolder 'trackingDataWcups_Center'],'-dpng')
+
+%% make plots for the distance that includes the interpolated values, but no longer divides data by "facing" or "not facing"
+figure('position',scrSize.*([1 1 .5 1]),'color',gg*ones(3,1));
+d=distFromCupInterp;
+
+subplot(521);hold on
+x=distanceBounds(1:end-1)+mean(diff(distanceBounds))*.5;
+occupancyByDistance=table;
+occupancyByDistance.DistanceBin=x';
+for i =1:nCups
+    a=histcounts(d(:,i),distanceBounds);
+    plot(x,a/30,['-' cupSymb{i} cupColor{i}],'linewidth',3)
+    occupancyByDistance.(['Cup' num2str(i) '_TotalTimeInSec'])=(a/30)';
+end
+writetable(occupancyByDistance,[outFolder 'Occupancy_by_DistanceInterpolated_' mouseName '.csv'])
+ylabel('seconds')
+xlabel('cm from cup')
+title({'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',15,'fontweight','bold')
+set(gca,'fontsize',20,'color',gg*ones(3,1))
+
+subplot(522);hold on
+bigDat=[];
+for i=1:nCups % cups
+    [a,c,b]=histcounts(d(:,i),distanceBounds);
+    tmp=nan(length(a),2);
+    for j=1:length(a)
+        here=newSig(b==j);
+        tmp(j,1)=mean(here,'omitnan');
+        tmp(j,2)=std(here,'omitnan')./sqrt(length(here));
+    end
+    x=c(1:end-1)+.5*mean(diff(c));
+    if i==1
+        bigDat=cat(2,bigDat,x');
+    end
+    bigDat=cat(2,bigDat,tmp);
+    errorbar(x+.25*(i-1),tmp(:,1),tmp(:,2),['-' cupColor{i}],'LineWidth',3)
+end
+signalDistance=table;
+signalDistance.DistanceBin=x';
+metStr={'Mean' 'SEM'};
+for i=1:nCups
+    for l=1:2
+        signalDistance.(['Cup' num2str(i) '_' metStr{l}])=bigDat(:,2*(i-1)+l+1);
+    end
+end
+writetable(signalDistance,[outFolder 'Signal_by_DistanceInterpolated_' mouseName '.csv'])
+% axis tight
+xlabel('cm from cup')
+ylabel('\muCeA-OTR signal')
+title({'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',15,'fontweight','bold')
+set(gca,'fontsize',20,'color',gg*ones(3,1))
+
+% make large plots whereby we plot the signal color coded by proximity to the cup
+for i = 1:nCups
+    subplot(5,2,[1 2]+2*i);hold on
+    x=trackingTime;
+    y=newSig;
+    a=plot(x,y,'-k','linewidth',.5);
+    a.Color=[a.Color .3];
+    z=d(:,i);
+    aaa=patch([x nan],[y nan],[z; nan],'edgecolor', 'flat','linewidth',2);
+    colormap(flipud(jet));
+    axis tight
+    ylabel('CeA OTR signal')
+    title(sprintf('Cup %d',i))
+    c=colorbar;
+    clim([0 max(max(d(:)))])
+    c.Label.String='cm from cup';
+    c.Label.FontSize=15;
+    xlabel('seconds')
+    set(gca,'fontsize',20,'color',gg*ones(3,1))
+end
+sgtitle([strrep(mouseName,'_',' ') ' Distance Interpolated'],'fontsize',40)
+print(gcf,[outFolder 'cupDistance_CeAOTR_FP_InterpolatedDistance'],'-dpng')
+
+
+%% make plots for the distance that excludes interpolated values (because angles are unreliable in interpolated values)
+figure('position',scrSize.*([1 1 .5 1]),'color',gg*ones(3,1));
+faceStr={'FacingCup' 'FacingAway'};
+newAng=abs(theAngles);
+newAng=rad2deg(newAng);
+[~,~,newAng]=histcounts(newAng,[0 90 180]); % make binary categorization as facing toward (<90) or away from (>90) cup
+d=distFromCup;
+subplot(521);hold on
+lineDir={'-' ':'};
+x=distanceBounds(1:end-1)+mean(diff(distanceBounds))*.5;
+distanceByOrientation=table;
+distanceByOrientation.DistanceBin=x';
+for i =1:nCups
+    for k=1:2
+        justThese=newAng(:,i)==k;
+        a=histcounts(d(justThese,i),distanceBounds);
+        distanceByOrientation.(['Cup' num2str(i) '_' faceStr{k}])=(a/30)';
+        plot(x,a/30,[lineDir{k} cupSymb{i} cupColor{i}],'linewidth',3)
+    end
+end
+ylabel('seconds')
+xlabel('cm from cup')
+title({'-Facing Cup';'--Facing Away From Cup';'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',15,'fontweight','bold')
+set(gca,'fontsize',20,'color',gg*ones(3,1))
+writetable(distanceByOrientation,[outFolder 'Occupancy_by_distanceByOrientation_' mouseName '.csv'])
+
+% add in two conditions of facing toward or away
+faceStr={'FacingCup' 'FacingAway'};
+subplot(522);hold on
+bigDat=[];
+for i=1:nCups % cups
+    [a,c,b]=histcounts(d(:,i),distanceBounds);
+    for k=1:2
+        tmp=nan(length(a),2);
+        for j=1:length(a)
+            here=newSig(b==j & newAng(:,i)==k);
+            tmp(j,1)=mean(here);
+            tmp(j,2)=std(here)./sqrt(length(here));
+        end
+        x=c(1:end-1)+.5*mean(diff(c));
+        if i==1 && k==1
+            bigDat=cat(2,bigDat,x');
+        end
+        bigDat=cat(2,bigDat,tmp);
+        errorbar(x+.25*(i-1),tmp(:,1),tmp(:,2),[lineDir{k} cupColor{i}],'LineWidth',3)
+    end
+end
+signalDistance=table;
+signalDistance.DistanceBin=x';
+metStr={'Mean' 'SEM'};
+for i=1:nCups
+    for k = 1:2
+        for l=1:2
+            signalDistance.(['Cup' num2str(i) '_' faceStr{k} metStr{l}])=bigDat(:,4*(i-1)+2*(k-1)+l+1);
+        end
+    end
+end
+writetable(signalDistance,[outFolder 'Signal_by_Distance_' mouseName '.csv'])
+% axis tight
+xlabel('cm from cup')
+ylabel('\muCeA-OTR signal')
+title({'-Facing Cup';'--Facing Away From Cup';'\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4'},'fontsize',15,'fontweight','bold')
+set(gca,'fontsize',20,'color',gg*ones(3,1))
+
+% make large plots whereby we plot the signal color coded by proximity to the cup
+for i = 1:nCups
+    subplot(5,2,[1 2]+2*i);hold on
+    x=trackingTime;
+    y=newSig;
+    a=plot(x,y,'-k','linewidth',.5);
+    a.Color=[a.Color .3];
+    z=d(:,i);
+    aaa=patch([x nan],[y nan],[z; nan],'edgecolor', 'flat','linewidth',2);
+    colormap(flipud(jet));
+    axis tight
+    ylabel('CeA OTR signal')
+    title(sprintf('Cup %d',i))
+    c=colorbar;
+    clim([0 max(max(d(:)))])
+    c.Label.String='cm from cup';
+    c.Label.FontSize=15;
+    xlabel('time (sec)')
+    set(gca,'fontsize',20,'color',gg*ones(3,1))
+end
+sgtitle([strrep(mouseName,'_',' ') ' Distance'],'fontsize',40)
+print(gcf,[outFolder 'cupDistance_CeAOTR_FP'],'-dpng')
+
+%% make plots for the angles, use circBins
+figure('position',[0 0 scrSize(3)/3 scrSize(3)/6],'color',gg*ones(3,1));
+socDist=distFromCup;
+tmpAngs=abs(theAngles);
+tmpAngs=rad2deg(tmpAngs);
+
+subplot(121);hold on
+circBins=linspace(0,180,19);
+x=circBins(1:end-1)+mean(diff(circBins))*.5;
+occupancyByAngle=table;
+occupancyByAngle.AngleBin=x';
+for i =1:nCups
+    onlyHere=socDist(:,i)<withinThisDistance;
+    a=histcounts(tmpAngs(onlyHere,i),circBins);
+    plot(x,a/30,['-' cupSymb{i} cupColor{i}],'linewidth',3) % /30 because want in seconds instaed of sample counts..
+    occupancyByAngle.(['Cup' num2str(i) '_TotalTimeInSec'])=(a/30)';
+end
+writetable(occupancyByAngle,[outFolder 'Occupancy_by_Angle_' mouseName '.csv'])
+ylabel({'time spent at this angle';['(only within ' num2str(withinThisDistance) 'cm distance)']})
+xlabel('degrees')
+% set(gca,'xtick',1:2,'xticklabel',{'Facing' 'Behind'})
+title('\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4','fontsize',15,'fontweight','bold')
+xlim([0 180])
+% vline(90,':k')
+box on
+text([45 135],[0 0],{'Front' 'Behind'},'HorizontalAlignment','center','VerticalAlignment','bottom','fontsize',15)
+set(gca,'fontsize',15,'color',gg*ones(3,1))
+
+% only look close to the cup (<20cm) and bin the occurance of certain angles..
+subplot(122);hold on
+bigDat=[];
+for i=1:nCups % cups
+    onlyClose=socDist(:,i)<withinThisDistance; % limit to the times when close to the cup
+    [a,c,b]=histcounts(tmpAngs(:,i),circBins);
+    tmp=nan(length(a),2);
+    for j=1:length(a)
+        here=newSig(b==j & onlyClose); % onlyClose
+        tmp(j,1)=mean(here);
+        tmp(j,2)=std(here)./sqrt(length(here));
+    end
+    x=c(1:end-1)+.5*mean(diff(c));
+    bigDat=cat(2,bigDat,tmp);
+    errorbar(x+.25*(i-1),tmp(:,1),tmp(:,2),['-' cupColor{i}],'LineWidth',3)
+end
+signalAngle=table;
+signalAngle.AngleBin=x';
+metStr={'Mean' 'SEM'};
+for i=1:nCups
+    for l=1:2
+        signalAngle.(['Cup' num2str(i) '_' metStr{l}])=bigDat(:,2*(i-1)+l);
+    end
+end
+writetable(signalAngle,[outFolder 'Signal_by_Angle_' mouseName '.csv'])
+
+axis tight
+xlabel('degrees')
+ylabel({'mean CeA-OTR signal';['(only within ~' num2str(withinThisDistance) 'cm distance)']})
+title('\color{yellow}Cup1 \color{red}Cup2 \color{blue}Cup3 \color{magenta}Cup4','fontsize',15,'fontweight','bold')
+xlim([0 180])
+% vline(90,':k')
+box on
+set(gca,'fontsize',15,'color',gg*ones(3,1))
+
+yHere=ylim;
+text([45 135],[yHere(1) yHere(1)],{'Front' 'Behind'},'HorizontalAlignment','center','VerticalAlignment','bottom','fontsize',15)
+% 
+sgtitle({['\fontsize{30}' strrep(mouseName,'_',' ') ' Angle'];['\fontsize{20}(only within ' num2str(withinThisDistance) 'cm)']})
+print(gcf,[outFolder 'cupAngle_CeAOTR_FP_Angle'],'-dpng')
+
+
+%
+close all
+
+%%%%% BINNING %%%%%%
+
+
+if strcmp(binData, 'yes')
+    % Initialize cell arrays to store binned data
+    binnedSig = cell(numBins, 1);
+    binnedRef = cell(numBins, 1);
+    binnedTime = cell(numBins, 1);
+    binnedOccupancy = cell(numBins, 1);
+
+    for i = 1:numBins
+        % Find indices for current bin
+        binIndices = find(theTime >= binStart(i) & theTime < binEnd(i));
+        
+        % Store binned data
+        binnedSig{i} = newSig(binIndices);
+        binnedRef{i} = ref(binIndices);
+        binnedTime{i} = theTime(binIndices);
+        binnedOccupancy{i} = occupancy(binIndices); % Assuming occupancy data exists
+    end
+
+    % Process and save the signal and occupancy for each bin
+    for i = 1:numBins
+        % Perform analysis on each bin
+        currentSig = binnedSig{i};
+        currentRef = binnedRef{i};
+        currentTime = binnedTime{i};
+        currentOccupancy = binnedOccupancy{i};
+        
+        % Calculate mean and std of the signal in each bin
+        meanSig = mean(currentSig);
+        stdSig = std(currentSig);
+        
+        % Create table and save to CSV
+        T = table(currentTime, currentSig, currentRef, currentOccupancy, 'VariableNames', {'Time', 'Signal', 'Reference', 'Occupancy'});
+        csvFileName = fullfile(outFolder, sprintf('bin_%d.csv', i));
+        writetable(T, csvFileName);
+        
+        fprintf('Bin %d: Mean Signal = %.2f, Std Signal = %.2f\n', i, meanSig, stdSig);
+    end
+else
+    % Process the entire signal without binning
+    meanSig = mean(newSig);
+    stdSig = std(newSig);
+    
+    % Create table and save to CSV
+    T = table(theTime, newSig, ref, 'VariableNames', {'Time', 'Signal', 'Reference', 'Occupancy'});
+    csvFileName = fullfile(outFolder, 'no_bin.csv');
+    writetable(T, csvFileName);
+    
+    fprintf('No binning: Mean Signal = %.2f, Std Signal = %.2f\n', meanSig, stdSig);
+end
