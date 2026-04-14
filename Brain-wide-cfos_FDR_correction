@@ -1,0 +1,120 @@
+%% FDR Correction (Benjamini-Hochberg) Within Defined Families
+%  Reads a table of uncorrected p-values from post-hoc pairwise comparisons,
+%  applies BH-FDR correction within each specified family of comparisons,
+%  and exports a results table with appended q-values and discovery calls.
+%
+%  Hunter Lanovoi — 2026
+%  =========================================================================
+ 
+clear; clc;
+ 
+%% ========================= USER INPUT SECTION ============================
+ 
+% --- File paths ---
+input_dir  = '/Users/HL801/Desktop/HISTOLOGY/FDR_CORRECTION/LPS_ASTT_cfos/';
+input_file = 'cfos_pvalues_3.csv';          % Input file (.csv or .xlsx)
+output_file = 'cfos_FDR_corrected_3.csv';   % Output file name
+ 
+% --- FDR parameters ---
+Q_threshold = 0.05;                        % False discovery rate threshold
+ 
+% --- Define families to correct within ---
+%     Each family name must match entries in the 'Family' column of your table.
+%     Only families listed here will be corrected.
+%     To correct ALL families found in the table, set: families = {};
+families = {'interoceptive','subnuclei-interoceptive', 'subnuclei-social', 'social'};
+ 
+% --- Table column names ---
+%     Adjust these if your column headers differ.
+col_family       = 'Family';
+col_region       = 'BrainRegion';
+col_comparison   = 'Comparison';
+col_p_uncorrected = 'p_uncorrected';
+ 
+% ======================== END USER INPUT SECTION ==========================
+ 
+%% Load data
+filepath = fullfile(input_dir, input_file);
+assert(isfile(filepath), 'Input file not found: %s', filepath);
+ 
+T = readtable(filepath, 'TextType', 'string');
+fprintf('Loaded %d comparisons from %s\n\n', height(T), input_file);
+ 
+% Validate required columns exist
+required_cols = {col_family, col_region, col_comparison, col_p_uncorrected};
+for i = 1:numel(required_cols)
+    assert(ismember(required_cols{i}, T.Properties.VariableNames), ...
+        'Missing required column: %s', required_cols{i});
+end
+ 
+%% Identify families
+if isempty(families)
+    families = unique(T.(col_family))';
+    fprintf('Auto-detected %d families: %s\n\n', numel(families), strjoin(string(families), ', '));
+end
+ 
+%% Initialize output columns
+T.q_value   = nan(height(T), 1);
+T.discovery = strings(height(T), 1);
+ 
+%% Apply BH-FDR correction within each family
+for f = 1:numel(families)
+    fam = families{f};
+    idx = T.(col_family) == string(fam);
+    n_comparisons = sum(idx);
+ 
+    if n_comparisons == 0
+        warning('Family "%s" not found in table. Skipping.', fam);
+        continue;
+    end
+ 
+    % Extract uncorrected p-values for this family
+    p_vals = T.(col_p_uncorrected)(idx);
+ 
+    % --- Benjamini-Hochberg procedure ---
+    [p_sorted, sort_order] = sort(p_vals);
+    m = numel(p_sorted);
+    ranks = (1:m)';
+ 
+    % BH adjusted p-values (step-up)
+    q_sorted = p_sorted .* m ./ ranks;
+ 
+    % Enforce monotonicity (cumulative minimum from the bottom up)
+    for k = (m-1):-1:1
+        q_sorted(k) = min(q_sorted(k), q_sorted(k+1));
+    end
+ 
+    % Cap at 1
+    q_sorted = min(q_sorted, 1);
+ 
+    % Unsort back to original order
+    q_vals = nan(m, 1);
+    q_vals(sort_order) = q_sorted;
+ 
+    % Assign to table
+    T.q_value(idx)   = q_vals;
+    T.discovery(idx) = repmat("No", n_comparisons, 1);
+    disc_idx = find(idx);
+    T.discovery(disc_idx(q_vals <= Q_threshold)) = "Yes";
+ 
+    % --- Print family summary ---
+    n_disc = sum(q_vals <= Q_threshold);
+    fprintf('Family: %-20s | Comparisons: %3d | Discoveries: %3d\n', ...
+        fam, n_comparisons, n_disc);
+end
+ 
+%% Export results
+outpath = fullfile(input_dir, output_file);
+writetable(T, outpath);
+fprintf('\nResults saved to: %s\n', outpath);
+ 
+%% Display discoveries
+disc_table = T(T.discovery == "Yes", :);
+if height(disc_table) > 0
+    fprintf('\n========== DISCOVERIES (q <= %.2f) ==========\n\n', Q_threshold);
+    disp(disc_table(:, {col_family, col_region, col_comparison, col_p_uncorrected, 'q_value'}));
+else
+    fprintf('\nNo discoveries at Q = %.2f threshold.\n', Q_threshold);
+end
+ 
+fprintf('Done.\n');
